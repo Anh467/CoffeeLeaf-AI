@@ -4,7 +4,13 @@ import unittest
 from pathlib import Path
 
 from scripts.quality_gate import evaluate_quality_gate, promote_candidate
-from scripts.run_pipeline import evaluation_version, fingerprint_dataset, validate_dataset
+from scripts.run_pipeline import (
+    enrich_metrics,
+    evaluation_version,
+    fingerprint_dataset,
+    prepare_output_directory,
+    validate_dataset,
+)
 
 
 CLASSES = ["Healthy", "Miner", "Phoma", "Rust"]
@@ -88,6 +94,70 @@ class PipelineTests(unittest.TestCase):
             second = fingerprint_dataset(dataset)
 
         self.assertNotEqual(first, second)
+
+    def test_prepare_output_directory_removes_stale_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output_dir = root / "outputs" / "latest"
+            output_dir.mkdir(parents=True)
+            (output_dir / "stale.pth").write_bytes(b"old")
+
+            prepare_output_directory(root, output_dir)
+
+            self.assertTrue(output_dir.is_dir())
+            self.assertFalse((output_dir / "stale.pth").exists())
+
+    def test_prepare_output_directory_rejects_broad_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            with self.assertRaisesRegex(ValueError, "must be a subdirectory"):
+                prepare_output_directory(root, root / "outputs")
+
+    def test_enrich_metrics_rejects_unknown_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = make_dataset(root)
+            output_dir = root / "outputs" / "latest"
+            output_dir.mkdir(parents=True)
+            metrics_path = root / "metrics" / "candidate.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "models": [
+                            {
+                                "model_name": "EfficientNetV2-S",
+                                "best_val_accuracy": 0.96,
+                                "test_accuracy": 0.95,
+                                "test_macro_f1": 0.95,
+                                "checkpoint": "model.pth",
+                            }
+                        ],
+                        "candidate": {"model_name": "UnknownModel"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "train": {
+                    "seed": 42,
+                    "batch_size": 32,
+                    "epochs": 1,
+                    "num_workers": 0,
+                    "val_ratio": 0.15,
+                }
+            }
+
+            with self.assertRaisesRegex(ValueError, "UnknownModel"):
+                enrich_metrics(
+                    metrics_path,
+                    root,
+                    output_dir,
+                    config,
+                    {"dataset_dir": str(dataset)},
+                )
 
     def test_quality_gate_approves_strict_improvement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

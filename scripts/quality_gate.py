@@ -6,7 +6,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
+if __package__:
+    from .run_pipeline import load_config
+else:
+    from run_pipeline import load_config
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -127,8 +130,7 @@ def main() -> int:
     args = parse_args()
     repo_root = Path(__file__).resolve().parents[1]
     config_path = resolve(repo_root, args.config)
-    with config_path.open("r", encoding="utf-8") as stream:
-        config = yaml.safe_load(stream)
+    config = load_config(config_path)
 
     candidate_path = resolve(
         repo_root, args.candidate or config["output"]["candidate_metrics"]

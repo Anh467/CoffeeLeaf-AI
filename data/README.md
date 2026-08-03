@@ -20,7 +20,7 @@ The images are intentionally not stored in Git. After copying them, run:
 
 ```powershell
 dvc add data/raw
-git add data/raw.dvc .gitignore
+git add data/raw.dvc data/.gitignore
 ```
 
 Configure a DVC remote before `dvc push`. Keep remote credentials in environment

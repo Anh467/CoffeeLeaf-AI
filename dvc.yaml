@@ -11,19 +11,20 @@ stages:
       - output
       - mlflow
     outs:
-      - outputs/latest
+      - ${output.directory}
     metrics:
-      - metrics/candidate.json:
+      - ${output.candidate_metrics}:
           cache: false
 
   quality_gate:
     cmd: python scripts/quality_gate.py --config params.yaml
     deps:
       - scripts/quality_gate.py
-      - metrics/candidate.json
-      - metrics/champion.json
+      - scripts/run_pipeline.py
+      - ${output.candidate_metrics}
+      - ${quality_gate.champion_manifest}
     params:
       - quality_gate
     metrics:
-      - metrics/promotion.json:
+      - ${quality_gate.report}:
           cache: false

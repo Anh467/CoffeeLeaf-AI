@@ -139,14 +139,29 @@ def evaluation_version(data_version: str, seed: int, val_ratio: float) -> str:
     return hashlib.sha256(contract.encode("utf-8")).hexdigest()
 
 
+def prepare_output_directory(repo_root: Path, output_dir: Path) -> None:
+    outputs_root = (repo_root / "outputs").resolve()
+    output_dir = output_dir.resolve()
+    if output_dir == outputs_root or outputs_root not in output_dir.parents:
+        raise ValueError(
+            f"output.directory must be a subdirectory of {outputs_root}, got {output_dir}"
+        )
+    if output_dir.exists():
+        if not output_dir.is_dir():
+            raise ValueError(f"output.directory is not a directory: {output_dir}")
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+
 def execute_notebook(
+    repo_root: Path,
     notebook_path: Path,
     output_dir: Path,
     metrics_path: Path,
     dataset_dir: Path,
     train_config: dict[str, Any],
 ) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
+    prepare_output_directory(repo_root, output_dir)
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
     metrics_path.unlink(missing_ok=True)
 
@@ -216,9 +231,19 @@ def enrich_metrics(
             (output_dir / model["checkpoint"]).relative_to(repo_root).as_posix()
         )
     selected_name = payload["candidate"]["model_name"]
-    payload["candidate"] = next(
-        model.copy() for model in payload["models"] if model["model_name"] == selected_name
+    matched_candidate = next(
+        (
+            model.copy()
+            for model in payload["models"]
+            if model["model_name"] == selected_name
+        ),
+        None,
     )
+    if matched_candidate is None:
+        raise ValueError(
+            f"Candidate model '{selected_name}' not found among reported models"
+        )
+    payload["candidate"] = matched_candidate
     payload.update(
         {
             "git_sha": git_sha,
@@ -346,6 +371,7 @@ def main() -> int:
         dataset_dir, list(config["data"]["expected_classes"])
     )
     execute_notebook(
+        repo_root,
         repo_root / "coffee_leaf_experiment.ipynb",
         output_dir,
         metrics_path,

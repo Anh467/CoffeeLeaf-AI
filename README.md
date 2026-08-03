@@ -31,7 +31,7 @@ Copy dữ liệu theo cấu trúc trong `data/README.md`, rồi chạy:
 
 ```powershell
 dvc add data/raw
-git add data/raw.dvc .gitignore
+git add data/raw.dvc data/.gitignore
 ```
 
 Remote miễn phí trên máy khác hoặc ổ đĩa khác:
