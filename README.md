@@ -8,6 +8,8 @@ model nối tiếp nhưng chỉ cần một bộ annotation:
    `miner`, `phoma`, `rust`.
 3. DVC huấn luyện các ứng viên, lưu metrics, áp quality gate và đóng gói cặp
    model phù hợp nhất vào `deployment/`.
+4. MLflow trên DagsHub ghi lại experiment, đăng ký challenger và chỉ chuyển
+   model tốt hơn sang `Production`/alias `champion`.
 
 Model segmentation được train class-agnostic (`leaf`). Nhãn bệnh trong polygon
 gốc chỉ được dùng để tạo crop classification, vì vậy inference không phụ thuộc
@@ -16,9 +18,9 @@ vào nhãn bệnh do detector dự đoán.
 ## Cấu trúc tối giản
 
 ```text
-pipeline.py       # prepare, train, select, inference và doctor
+pipeline.py       # prepare, train, select, publish, inference và doctor
 params.yaml       # dữ liệu, hyperparameters, quality gates
-dvc.yaml          # DAG: prepare -> train hai nhánh -> select
+dvc.yaml          # DAG: prepare -> train hai nhánh -> select -> publish
 data/raw/         # dữ liệu gốc do DVC quản lý, không commit ảnh vào Git
 metrics/          # JSON/CSV nhỏ để DVC so sánh thí nghiệm
 models/           # checkpoint ứng viên do DVC cache
@@ -43,15 +45,18 @@ python pipeline.py doctor
 PyTorch nên được cài bằng wheel CUDA phù hợp với máy trước khi cài phần còn lại
 nếu muốn train bằng GPU.
 
-Khởi tạo một DVC remote dùng chung cho nhóm, ví dụ S3:
+Tạo/import repository `Anh467/CoffeeLeaf-AI` trên DagsHub, lấy access token rồi
+cấu hình một lần:
 
 ```bash
-dvc remote add -d storage s3://YOUR_BUCKET/coffee-leaf-ai
-dvc remote modify storage region YOUR_REGION
+export DAGSHUB_USER_TOKEN="..."          # dùng secret của runner, không ghi vào Git
+python pipeline.py setup-dagshub
 ```
 
-Không commit access key. Dùng biến môi trường/credential profile của nhà cung
-cấp cloud. Có thể thay S3 bằng SSH, Azure, GCS hoặc một remote DVC khác.
+Lệnh này nối MLflow Tracking và DVC remote với DagsHub. Nếu owner/repository
+khác giá trị mặc định trong `params.yaml`, đặt `DAGSHUB_REPO_OWNER` và
+`DAGSHUB_REPO_NAME`. Credential chỉ nằm trong môi trường/cấu hình local; tuyệt
+đối không commit token hay `.dvc/config.local`.
 
 ## 2. Dữ liệu và annotation
 
@@ -119,6 +124,9 @@ Các stage:
 - `train_classifiers`: mặc định so sánh EfficientNetV2-S và RegNetY-3.2GF.
 - `select`: quality gate trước, sau đó tính điểm tổng hợp giữa chất lượng,
   latency và kích thước checkpoint.
+- `publish`: log bundle/params/metrics/fingerprint lên DagsHub MLflow, so sánh
+  challenger với model `Production`, rồi promote theo chính sách trong
+  `params.yaml`.
 
 Thay hyperparameter rồi chạy một DVC experiment:
 
@@ -129,6 +137,18 @@ dvc exp show
 dvc metrics diff
 ```
 
+Thêm ảnh hoặc sửa annotation trong `data/raw`, đổi danh sách candidate hay
+hyperparameter trong `params.yaml`, rồi chạy lại `dvc repro`. DVC chỉ chạy lại
+những stage train bị ảnh hưởng; `publish` luôn kiểm tra lại trạng thái Registry
+và nhánh Git, nhưng nhận diện bundle theo SHA-256 nên không tạo model version
+trùng. Nhờ vậy candidate được train ở feature branch có thể được promote sau khi
+merge và chạy pipeline trên `main`.
+
+Tên key của classifier là tên experiment; trường `architecture` chọn backbone
+được hỗ trợ (`efficientnet_v2_s` hoặc `regnet_y_3_2gf`). Vì vậy có thể khai báo
+nhiều cấu hình của cùng một backbone với image size/dropout khác nhau mà không
+sửa code. Candidate YOLO nhận trực tiếp tên/path weight Ultralytics.
+
 ### Quy tắc lựa chọn mặc định
 
 - Segmenter phải đạt `mAP50-95 >= 0.45` và `recall >= 0.65`.
@@ -138,7 +158,34 @@ dvc metrics diff
 - Trong nhóm qua quality gate, điểm chất lượng có trọng số lớn hơn latency và
   dung lượng model. Có thể sửa toàn bộ ngưỡng/trọng số trong `params.yaml`.
 - Nếu không ứng viên nào đạt gate, hệ thống vẫn đóng gói ứng viên tốt nhất để
-  phân tích nhưng ghi `deploy_ready: false`; không nên đưa bundle đó lên production.
+  phân tích nhưng ghi `deploy_ready: false`; DagsHub chỉ log experiment và không
+  tạo model version.
+
+### Champion–challenger trên DagsHub
+
+Điểm dùng để so sánh **giữa các lần train** là `deployment_score` ổn định, chỉ
+dùng validation metrics:
+
+| Metric | Trọng số mặc định |
+|---|---:|
+| Segmenter mAP50-95 | 0.35 |
+| Segmenter recall | 0.15 |
+| Classifier macro F1 | 0.35 |
+| Classifier recall của lớp yếu nhất | 0.15 |
+
+Bundle mới chỉ thành champion khi đồng thời:
+
+- cả segmenter và classifier qua quality gate;
+- chạy từ nhánh `main` (`required_git_branch`);
+- dùng cùng `evaluation_fingerprint` với champion hiện tại;
+- `deployment_score` tăng ít nhất `0.005`.
+
+Model đủ gate nhưng chưa tốt hơn vẫn được đăng ký làm candidate để audit. Model
+đầu tiên qua gate được promote nếu `allow_first_model: true`. Nếu validation data
+hoặc preprocessing validation thay đổi, fingerprint cũng đổi và auto-promotion
+dừng với trạng thái `evaluation_set_changed`; hãy giữ một validation benchmark
+cố định hoặc đánh giá lại baseline trước khi chủ động bật
+`allow_evaluation_change`.
 
 Kết quả quan trọng:
 
@@ -146,15 +193,33 @@ Kết quả quan trọng:
 metrics/segmenters.json
 metrics/classifiers.json
 metrics/selection.json
+metrics/publish.json
 metrics/leaderboard.csv
 deployment/leaf_segmenter.pt
 deployment/leaf_classifier.pt
 deployment/manifest.json
 ```
 
-`manifest.json` lưu tên ứng viên, metrics, preprocessing, thresholds và SHA-256
-của từng checkpoint. Đặt `deployment.export_onnx: true` nếu môi trường đã có
-đủ dependency ONNX và cần export cho runtime khác.
+`manifest.json` lưu tên ứng viên, metrics, dataset/evaluation fingerprint,
+`deployment_score`, preprocessing, thresholds và SHA-256 của checkpoint/bundle.
+Đặt `deployment.export_onnx: true` nếu môi trường đã có đủ dependency ONNX và
+cần export cho runtime khác.
+
+Trên DagsHub, mỗi run chứa bundle và các file tái lập (`params.yaml`, `dvc.yaml`,
+metrics). Model Registry dùng stage `Production` và alias `champion` làm hợp đồng
+triển khai. Việc promote này không tự tạo inference server; service triển khai có
+thể tải đúng bundle production bằng MLflow:
+
+```python
+import dagshub
+import mlflow
+
+dagshub.init(repo_owner="Anh467", repo_name="CoffeeLeaf-AI", mlflow=True)
+bundle = mlflow.artifacts.download_artifacts(
+    artifact_uri="models:/CoffeeLeaf-AI-Pipeline/Production"
+)
+print(bundle)
+```
 
 ## 4. Suy luận ảnh toàn cây
 
@@ -163,8 +228,12 @@ Sau `dvc pull`:
 ```bash
 python pipeline.py predict \
   --source path/to/whole_coffee_tree.jpg \
+  --bundle deployment \
   --output runs/predict
 ```
+
+`--bundle` cũng nhận đường dẫn do `mlflow.artifacts.download_artifacts` trả về,
+nhờ vậy runtime luôn có thể lấy champion từ DagsHub Registry.
 
 Đầu ra gồm:
 
@@ -186,4 +255,6 @@ dvc dag
 ```
 
 `doctor --check-data` xác minh file tồn tại, class id, polygon chuẩn hóa và group
-split trước khi sử dụng GPU.
+split trước khi sử dụng GPU. `doctor` chỉ báo token là `missing`, không in giá trị
+secret. Publish cần `DAGSHUB_USER_TOKEN`; nếu không có, stage sẽ dừng thay vì giả
+vờ đã triển khai.

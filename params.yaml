@@ -24,10 +24,12 @@ segmentation:
 classification:
   candidates:
     efficientnet_v2_s:
+      architecture: efficientnet_v2_s
       image_size: 300
       dropout: 0.4
       unfreeze_blocks: 3
     regnet_y_3_2gf:
+      architecture: regnet_y_3_2gf
       image_size: 224
       dropout: 0.3
       unfreeze_blocks: 1
@@ -41,6 +43,12 @@ classification:
   label_smoothing: 0.1
   patience: 6
 selection:
+  # Stable, validation-only score used between runs for champion/challenger.
+  deployment_weights:
+    segmenter_map50_95: 0.35
+    segmenter_recall: 0.15
+    classifier_macro_f1: 0.35
+    classifier_min_class_recall: 0.15
   segmentation:
     min_map50_95: 0.45
     min_recall: 0.65
@@ -63,3 +71,14 @@ deployment:
   image_size: 1280
   export_onnx: false
   onnx_opset: 17
+dagshub:
+  enabled: true
+  repo_owner: Anh467
+  repo_name: CoffeeLeaf-AI
+  experiment_name: coffee-leaf-training
+  registered_model_name: CoffeeLeaf-AI-Pipeline
+  promotion:
+    min_score_improvement: 0.005
+    allow_first_model: true
+    allow_evaluation_change: false
+    required_git_branch: main

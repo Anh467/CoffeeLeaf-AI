@@ -72,8 +72,10 @@ stages:
       - models/classifiers
       - metrics/segmenters.json
       - metrics/classifiers.json
+      - data/processed/dataset_manifest.json
     params:
       - data.classes
+      - classification.candidates
       - selection
       - deployment
     outs:
@@ -86,3 +88,20 @@ stages:
           cache: false
           x: candidate
           y: score
+
+  publish:
+    cmd: python pipeline.py publish
+    # Re-check external Registry state/branch even when the bundle is unchanged.
+    always_changed: true
+    deps:
+      - pipeline.py
+      - deployment
+      - metrics/data.json
+      - metrics/segmenters.json
+      - metrics/classifiers.json
+      - metrics/selection.json
+    params:
+      - dagshub
+    metrics:
+      - metrics/publish.json:
+          cache: false

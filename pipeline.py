@@ -15,8 +15,10 @@ import hashlib
 import importlib
 import json
 import math
+import os
 import random
 import shutil
+import subprocess
 import tempfile
 import time
 from collections import Counter
@@ -31,6 +33,7 @@ from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+CLASSIFIER_ARCHITECTURES = {"efficientnet_v2_s", "regnet_y_3_2gf"}
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
@@ -103,6 +106,39 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def dataset_fingerprint(records: Sequence[Record], raw_dir: Path) -> str:
+    """Hash dataset identity and bytes, independent of filesystem ordering."""
+    digest = hashlib.sha256()
+    ordered = sorted(
+        records,
+        key=lambda item: (
+            item.split,
+            item.group_id,
+            item.image.relative_to(raw_dir).as_posix(),
+        ),
+    )
+    for record in ordered:
+        identity = {
+            "group_id": record.group_id,
+            "image": record.image.relative_to(raw_dir).as_posix(),
+            "label": record.label.relative_to(raw_dir).as_posix(),
+            "split": record.split,
+        }
+        digest.update(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+        )
+        digest.update(bytes.fromhex(sha256_file(record.image)))
+        digest.update(bytes.fromhex(sha256_file(record.label)))
+    return digest.hexdigest()
+
+
+def record_asset_id(record: Record, raw_dir: Path) -> str:
+    """Keep output names readable while preventing cross-folder collisions."""
+    relative = record.image.relative_to(raw_dir).as_posix()
+    suffix = hashlib.sha256(relative.encode()).hexdigest()[:12]
+    return f"{record.image.stem}__{suffix}"
 
 
 def seed_everything(seed: int) -> None:
@@ -283,6 +319,22 @@ def prepare(config: dict[str, Any]) -> None:
             "Use a group-aware manifest so the same tree/session cannot leak across splits."
         )
     seed_everything(int(config["seed"]))
+    full_fingerprint = dataset_fingerprint(records, raw_dir)
+    evaluation_records = [record for record in records if record.split == "val"]
+    evaluation_data_fingerprint = dataset_fingerprint(evaluation_records, raw_dir)
+    evaluation_protocol = {
+        "classes": classes,
+        "crop_padding_ratio": float(data["crop_padding_ratio"]),
+        "mask_background": bool(data["mask_background"]),
+        "mask_fill_rgb": [int(value) for value in data["mask_fill_rgb"]],
+        "min_crop_size": int(data["min_crop_size"]),
+    }
+    evaluation_fingerprint = hashlib.sha256(
+        (
+            evaluation_data_fingerprint
+            + json.dumps(evaluation_protocol, sort_keys=True, separators=(",", ":"))
+        ).encode()
+    ).hexdigest()
 
     segment_root = output_dir / "segmentation"
     classifier_root = output_dir / "classification"
@@ -294,10 +346,14 @@ def prepare(config: dict[str, Any]) -> None:
         polygons = read_polygons(record.label, len(classes))
         with Image.open(record.image) as source:
             image = source.convert("RGB")
-        image_target = segment_root / "images" / record.split / record.image.name
-        label_target = (
-            segment_root / "labels" / record.split / f"{record.image.stem}.txt"
+        asset_id = record_asset_id(record, raw_dir)
+        image_target = (
+            segment_root
+            / "images"
+            / record.split
+            / f"{asset_id}{record.image.suffix.lower()}"
         )
+        label_target = segment_root / "labels" / record.split / f"{asset_id}.txt"
         image_target.parent.mkdir(parents=True, exist_ok=True)
         label_target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(record.image, image_target)
@@ -332,7 +388,7 @@ def prepare(config: dict[str, Any]) -> None:
                 classifier_root
                 / record.split
                 / class_name
-                / f"{record.image.stem}__leaf_{leaf_number:04d}.jpg"
+                / f"{asset_id}__leaf_{leaf_number:04d}.jpg"
             )
             crop_target.parent.mkdir(parents=True, exist_ok=True)
             crop.save(crop_target, format="JPEG", quality=95, subsampling=0)
@@ -374,6 +430,19 @@ def prepare(config: dict[str, Any]) -> None:
         )
         for name in classes:
             metrics[f"leaf_crops_{split}_{name}"] = class_counts[(split, name)]
+    write_json(
+        output_dir / "dataset_manifest.json",
+        {
+            "classes": classes,
+            "dataset_fingerprint": full_fingerprint,
+            "evaluation_data_fingerprint": evaluation_data_fingerprint,
+            "evaluation_fingerprint": evaluation_fingerprint,
+            "evaluation_protocol": evaluation_protocol,
+            "records": len(records),
+            "splits": {split: image_counts[split] for split in splits},
+            "used_group_manifest": used_manifest,
+        },
+    )
     write_json(ROOT / "metrics" / "data.json", metrics)
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
 
@@ -684,6 +753,7 @@ def train_classifiers(config: dict[str, Any]) -> None:
 
     for candidate, candidate_settings in settings["candidates"].items():
         print(f"\n=== Training classifier: {candidate} ===")
+        architecture = str(candidate_settings.get("architecture", candidate))
         image_size = int(candidate_settings["image_size"])
         train_transform, eval_transform = classifier_transforms(image_size)
         train_dataset = LeafCropDataset(data_root / "train", classes, train_transform)
@@ -706,7 +776,7 @@ def train_classifiers(config: dict[str, Any]) -> None:
         test_loader = DataLoader(test_dataset, shuffle=False, **loader_args)
 
         model, head = build_classifier(
-            candidate,
+            architecture,
             len(classes),
             float(candidate_settings["dropout"]),
             int(candidate_settings["unfreeze_blocks"]),
@@ -787,7 +857,8 @@ def train_classifiers(config: dict[str, Any]) -> None:
                 stale_epochs = 0
                 torch.save(
                     {
-                        "model_name": candidate,
+                        "model_name": architecture,
+                        "candidate_name": candidate,
                         "state_dict": model.state_dict(),
                         "classes": classes,
                         "image_size": image_size,
@@ -895,6 +966,21 @@ def lower_is_better(value: float, values: Sequence[float]) -> float:
     if math.isclose(minimum, maximum):
         return 1.0
     return 1.0 - (value - minimum) / (maximum - minimum)
+
+
+def deployment_score(
+    segmenter_metrics: dict[str, Any],
+    classifier_metrics: dict[str, Any],
+    weights: dict[str, Any],
+) -> float:
+    """Return a stable validation score that is comparable between runs."""
+    values = {
+        "segmenter_map50_95": float(segmenter_metrics["map50_95"]),
+        "segmenter_recall": float(segmenter_metrics["recall"]),
+        "classifier_macro_f1": float(classifier_metrics["macro_f1"]),
+        "classifier_min_class_recall": float(classifier_metrics["min_class_recall"]),
+    }
+    return sum(float(weights[name]) * value for name, value in values.items())
 
 
 def score_candidates(
@@ -1013,6 +1099,11 @@ def select_models(config: dict[str, Any]) -> None:
     )
     segmenter_candidates = segmenter_report["candidates"]
     classifier_candidates = classifier_report["candidates"]
+    dataset_manifest = json.loads(
+        (
+            project_path(config["data"]["processed_dir"]) / "dataset_manifest.json"
+        ).read_text(encoding="utf-8")
+    )
     segmenter_name, segmenter_scores = score_candidates(
         segmenter_candidates, "segmentation", config["selection"]
     )
@@ -1029,9 +1120,16 @@ def select_models(config: dict[str, Any]) -> None:
 
     segmenter_passed = bool(segmenter_scores[segmenter_name]["quality_gate_passed"])
     classifier_passed = bool(classifier_scores[classifier_name]["quality_gate_passed"])
+    stable_score = deployment_score(
+        segmenter_candidates[segmenter_name],
+        classifier_candidates[classifier_name],
+        config["selection"]["deployment_weights"],
+    )
     manifest: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "deploy_ready": segmenter_passed and classifier_passed,
+        "deployment_score": stable_score,
+        "dataset": dataset_manifest,
         "classes": list(config["data"]["classes"]),
         "preprocessing": {
             "mask_background": bool(config["data"]["mask_background"]),
@@ -1056,6 +1154,11 @@ def select_models(config: dict[str, Any]) -> None:
         },
         "classifier": {
             "candidate": classifier_name,
+            "architecture": str(
+                config["classification"]["candidates"][classifier_name].get(
+                    "architecture", classifier_name
+                )
+            ),
             "score": classifier_scores[classifier_name]["score"],
             "quality_gate_passed": classifier_passed,
             "image_size": int(classifier_candidates[classifier_name]["image_size"]),
@@ -1067,6 +1170,9 @@ def select_models(config: dict[str, Any]) -> None:
         manifest["onnx"] = export_onnx_models(
             deployment_dir, manifest, int(config["deployment"]["onnx_opset"])
         )
+    manifest["bundle_sha256"] = hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     write_json(deployment_dir / "manifest.json", manifest)
 
     leaderboard: list[dict[str, Any]] = []
@@ -1095,6 +1201,7 @@ def select_models(config: dict[str, Any]) -> None:
         ROOT / "metrics" / "selection.json",
         {
             "deploy_ready": int(manifest["deploy_ready"]),
+            "deployment_score": stable_score,
             "segmenter_score": segmenter_scores[segmenter_name]["score"],
             "segmenter_quality_gate_passed": int(segmenter_passed),
             "classifier_score": classifier_scores[classifier_name]["score"],
@@ -1103,11 +1210,390 @@ def select_models(config: dict[str, Any]) -> None:
     )
     print(
         f"Selected {segmenter_name} + {classifier_name}; "
-        f"deploy_ready={manifest['deploy_ready']}"
+        f"deploy_ready={manifest['deploy_ready']}; score={stable_score:.6f}"
     )
 
 
-def predict(config: dict[str, Any], source: Path, output_dir: Path) -> None:
+def dagshub_coordinates(config: dict[str, Any]) -> tuple[str, str]:
+    settings = config["dagshub"]
+    owner = os.getenv("DAGSHUB_REPO_OWNER", str(settings["repo_owner"])).strip()
+    repo = os.getenv("DAGSHUB_REPO_NAME", str(settings["repo_name"])).strip()
+    if not owner or not repo:
+        raise ValueError("DagsHub repo owner and name must not be empty")
+    return owner, repo
+
+
+def current_git_branch() -> str:
+    for variable in ("GITHUB_REF_NAME", "DAGSHUB_GIT_BRANCH"):
+        value = os.getenv(variable, "").strip()
+        if value:
+            return value
+    result = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def git_ref_matches(required_branch: str) -> bool:
+    if not required_branch:
+        return True
+    if current_git_branch() == required_branch:
+        return True
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    for reference in (
+        f"refs/heads/{required_branch}",
+        f"refs/remotes/origin/{required_branch}",
+    ):
+        revision = subprocess.run(
+            ["git", "rev-parse", "--verify", reference],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if head and revision and head == revision:
+            return True
+    return False
+
+
+def initialize_dagshub(config: dict[str, Any], configure_dvc: bool) -> tuple[str, str]:
+    if not os.getenv("DAGSHUB_USER_TOKEN"):
+        raise RuntimeError(
+            "Set DAGSHUB_USER_TOKEN for non-interactive DagsHub authentication"
+        )
+    try:
+        import dagshub
+    except ImportError as error:
+        raise RuntimeError("Install requirements.txt to use DagsHub") from error
+    owner, repo = dagshub_coordinates(config)
+    dagshub.init(
+        repo_owner=owner,
+        repo_name=repo,
+        root=str(ROOT),
+        mlflow=True,
+        dvc=configure_dvc,
+        patch_mlflow=False,
+    )
+    return owner, repo
+
+
+def setup_dagshub(config: dict[str, Any]) -> None:
+    owner, repo = initialize_dagshub(config, configure_dvc=True)
+    print(
+        f"Configured DVC and MLflow for https://dagshub.com/{owner}/{repo}. "
+        "Credentials remain local."
+    )
+
+
+def find_bundle_run(client: Any, experiment_id: str, bundle_sha256: str) -> Any | None:
+    runs = client.search_runs(
+        [experiment_id],
+        filter_string=f"tags.bundle_sha256 = '{bundle_sha256}'",
+        order_by=["attributes.start_time DESC"],
+        max_results=20,
+    )
+    return next((run for run in runs if run.info.status == "FINISHED"), None)
+
+
+def log_bundle_run(
+    mlflow: Any,
+    client: Any,
+    experiment_id: str,
+    manifest: dict[str, Any],
+    owner: str,
+    repo: str,
+) -> str:
+    bundle_sha256 = str(manifest["bundle_sha256"])
+    existing = find_bundle_run(client, experiment_id, bundle_sha256)
+    if existing is not None:
+        return str(existing.info.run_id)
+
+    segmenter = manifest["segmenter"]
+    classifier = manifest["classifier"]
+    git_branch = current_git_branch()
+    with mlflow.start_run(
+        experiment_id=experiment_id,
+        run_name=f"bundle-{bundle_sha256[:12]}",
+    ) as active_run:
+        mlflow.set_tags(
+            {
+                "bundle_sha256": bundle_sha256,
+                "dataset_fingerprint": manifest["dataset"]["dataset_fingerprint"],
+                "evaluation_fingerprint": manifest["dataset"]["evaluation_fingerprint"],
+                "deploy_ready": str(bool(manifest["deploy_ready"])).lower(),
+                "dagshub_repo": f"{owner}/{repo}",
+                "pipeline": "leaf-segmentation-then-classification",
+                "git_branch": git_branch or "detached",
+            }
+        )
+        mlflow.log_params(
+            {
+                "segmenter": segmenter["candidate"],
+                "segmenter_image_size": segmenter["image_size"],
+                "classifier": classifier["candidate"],
+                "classifier_architecture": classifier.get(
+                    "architecture", classifier["candidate"]
+                ),
+                "classifier_image_size": classifier["image_size"],
+                "classes": ",".join(manifest["classes"]),
+                "schema_version": manifest["schema_version"],
+            }
+        )
+        mlflow.log_metrics(
+            {
+                "deployment_score": float(manifest["deployment_score"]),
+                "segmenter_map50_95": float(segmenter["metrics"]["map50_95"]),
+                "segmenter_recall": float(segmenter["metrics"]["recall"]),
+                "segmenter_latency_ms": float(segmenter["metrics"]["latency_ms"]),
+                "classifier_macro_f1": float(classifier["metrics"]["macro_f1"]),
+                "classifier_min_class_recall": float(
+                    classifier["metrics"]["min_class_recall"]
+                ),
+                "classifier_latency_ms": float(classifier["metrics"]["latency_ms"]),
+                "bundle_size_mb": (
+                    float(segmenter["metrics"]["size_mb"])
+                    + float(classifier["metrics"]["size_mb"])
+                ),
+            }
+        )
+        mlflow.log_artifacts(str(ROOT / "deployment"), artifact_path="bundle")
+        for artifact in (
+            ROOT / "params.yaml",
+            ROOT / "dvc.yaml",
+            ROOT / "metrics" / "data.json",
+            ROOT / "metrics" / "segmenters.json",
+            ROOT / "metrics" / "classifiers.json",
+            ROOT / "metrics" / "selection.json",
+        ):
+            mlflow.log_artifact(str(artifact), artifact_path="reproducibility")
+        return str(active_run.info.run_id)
+
+
+def find_model_version(
+    client: Any, model_name: str, bundle_sha256: str, run_id: str
+) -> Any | None:
+    versions = client.search_model_versions(f"name = '{model_name}'")
+    return next(
+        (
+            version
+            for version in versions
+            if (version.tags or {}).get("bundle_sha256") == bundle_sha256
+            or str(version.run_id) == run_id
+        ),
+        None,
+    )
+
+
+def production_version(client: Any, model_name: str) -> Any | None:
+    from mlflow.exceptions import MlflowException
+
+    try:
+        versions = client.get_latest_versions(model_name, stages=["Production"])
+    except MlflowException as error:
+        if getattr(error, "error_code", "") == "RESOURCE_DOES_NOT_EXIST" or (
+            "not found" in str(error).lower()
+        ):
+            return None
+        raise
+    return max(versions, key=lambda item: int(item.version), default=None)
+
+
+def version_score(client: Any, version: Any) -> float | None:
+    raw_score = (version.tags or {}).get("deployment_score")
+    if raw_score is not None:
+        return float(raw_score)
+    if not version.run_id:
+        return None
+    metric = client.get_run(version.run_id).data.metrics.get("deployment_score")
+    return None if metric is None else float(metric)
+
+
+def set_registry_alias(client: Any, model_name: str, alias: str, version: Any) -> None:
+    from mlflow.exceptions import MlflowException
+
+    try:
+        client.set_registered_model_alias(model_name, alias, str(version.version))
+    except (AttributeError, NotImplementedError, MlflowException) as error:
+        print(f"DagsHub registry alias {alias!r} is unavailable: {error}")
+
+
+def publish(config: dict[str, Any]) -> None:
+    settings = config["dagshub"]
+    if not bool(settings.get("enabled", True)):
+        write_json(
+            ROOT / "metrics" / "publish.json",
+            {"enabled": 0, "published": 0, "promoted": 0},
+        )
+        print("DagsHub publishing is disabled in params.yaml")
+        return
+
+    try:
+        import mlflow
+        from mlflow.tracking import MlflowClient
+    except ImportError as error:
+        raise RuntimeError("Install requirements.txt to publish with MLflow") from error
+
+    owner, repo = initialize_dagshub(config, configure_dvc=False)
+    manifest = json.loads(
+        (ROOT / "deployment" / "manifest.json").read_text(encoding="utf-8")
+    )
+    experiment = mlflow.set_experiment(str(settings["experiment_name"]))
+    client = MlflowClient()
+    run_id = log_bundle_run(
+        mlflow, client, str(experiment.experiment_id), manifest, owner, repo
+    )
+    candidate_score = float(manifest["deployment_score"])
+    model_name = str(settings["registered_model_name"])
+    champion = production_version(client, model_name)
+    champion_score = None if champion is None else version_score(client, champion)
+    champion_fingerprint = (
+        None
+        if champion is None
+        else (champion.tags or {}).get("evaluation_fingerprint")
+    )
+    evaluation_fingerprint = str(manifest["dataset"]["evaluation_fingerprint"])
+    git_branch = current_git_branch()
+    required_branch = str(settings["promotion"].get("required_git_branch", "")).strip()
+    branch_allowed = git_ref_matches(required_branch)
+    same_evaluation = champion is None or (
+        champion_fingerprint == evaluation_fingerprint
+    )
+    model_version = None
+    promoted = False
+    is_champion = False
+    reason = "quality_gate_failed"
+
+    if bool(manifest["deploy_ready"]):
+        model_version = find_model_version(
+            client, model_name, str(manifest["bundle_sha256"]), run_id
+        )
+        if model_version is None:
+            model_version = mlflow.register_model(
+                model_uri=f"runs:/{run_id}/bundle",
+                name=model_name,
+                await_registration_for=300,
+            )
+        version_tags = {
+            "bundle_sha256": str(manifest["bundle_sha256"]),
+            "dataset_fingerprint": str(manifest["dataset"]["dataset_fingerprint"]),
+            "evaluation_fingerprint": evaluation_fingerprint,
+            "deployment_score": f"{candidate_score:.12f}",
+            "segmenter": str(manifest["segmenter"]["candidate"]),
+            "classifier": str(manifest["classifier"]["candidate"]),
+            "classifier_architecture": str(
+                manifest["classifier"].get(
+                    "architecture", manifest["classifier"]["candidate"]
+                )
+            ),
+        }
+        for key, value in version_tags.items():
+            client.set_model_version_tag(
+                model_name, str(model_version.version), key, value
+            )
+        set_registry_alias(client, model_name, "candidate", model_version)
+
+        if champion is not None and str(champion.version) == str(model_version.version):
+            reason = "already_champion"
+            is_champion = True
+        elif not branch_allowed:
+            reason = "git_branch_not_allowed"
+        elif champion is None:
+            if bool(settings["promotion"]["allow_first_model"]):
+                reason = "first_qualified_model"
+                promoted = True
+            else:
+                reason = "first_model_requires_manual_approval"
+        elif not same_evaluation and not bool(
+            settings["promotion"].get("allow_evaluation_change", False)
+        ):
+            reason = "evaluation_set_changed"
+        elif champion_score is None:
+            reason = "champion_score_missing"
+        elif candidate_score - champion_score >= float(
+            settings["promotion"]["min_score_improvement"]
+        ):
+            reason = "score_improved"
+            promoted = True
+        else:
+            reason = "score_not_improved"
+
+        if promoted:
+            client.transition_model_version_stage(
+                name=model_name,
+                version=str(model_version.version),
+                stage="Production",
+                archive_existing_versions=True,
+            )
+            set_registry_alias(client, model_name, "champion", model_version)
+            is_champion = True
+
+    client.set_tag(run_id, "last_check_status", reason)
+    client.set_tag(run_id, "last_checked_git_branch", git_branch or "detached")
+    client.set_tag(run_id, "registered_model", model_name)
+    if promoted:
+        client.set_tag(run_id, "promotion_status", reason)
+        client.set_tag(run_id, "promotion_git_branch", git_branch or "detached")
+    if model_version is not None:
+        client.set_model_version_tag(
+            model_name,
+            str(model_version.version),
+            "last_check_status",
+            reason,
+        )
+        if promoted:
+            client.set_model_version_tag(
+                model_name, str(model_version.version), "promotion_status", reason
+            )
+            client.set_model_version_tag(
+                model_name,
+                str(model_version.version),
+                "promotion_git_branch",
+                git_branch or "detached",
+            )
+
+    score_improvement = (
+        0.0 if champion_score is None else candidate_score - champion_score
+    )
+    result = {
+        "enabled": 1,
+        "published": 1,
+        "deploy_ready": int(bool(manifest["deploy_ready"])),
+        "promoted": int(promoted),
+        "is_champion": int(is_champion),
+        "same_evaluation": int(same_evaluation),
+        "branch_allowed": int(branch_allowed),
+        "model_version": 0 if model_version is None else int(model_version.version),
+        "deployment_score": candidate_score,
+        "champion_score_before": (-1.0 if champion_score is None else champion_score),
+        "score_improvement": score_improvement,
+    }
+    write_json(ROOT / "metrics" / "publish.json", result)
+    print(
+        json.dumps(
+            {
+                **result,
+                "promotion_status": reason,
+                "git_branch": git_branch or "detached",
+                "run_id": run_id,
+                "registry": f"https://dagshub.com/{owner}/{repo}/models",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def predict(source: Path, output_dir: Path, bundle_dir: Path) -> None:
     try:
         import torch
         from torchvision import transforms
@@ -1115,7 +1601,7 @@ def predict(config: dict[str, Any], source: Path, output_dir: Path) -> None:
     except ImportError as error:
         raise RuntimeError("Install requirements.txt before inference") from error
 
-    deployment_dir = ROOT / "deployment"
+    deployment_dir = project_path(bundle_dir)
     manifest = json.loads(
         (deployment_dir / "manifest.json").read_text(encoding="utf-8")
     )
@@ -1284,6 +1770,40 @@ def doctor(config: dict[str, Any], check_data: bool) -> None:
             sum(float(value) for value in weights.values()), 1.0, abs_tol=1e-6
         ):
             errors.append(f"selection.{kind}.weights must sum to 1.0")
+    deployment_weights = config.get("selection", {}).get("deployment_weights", {})
+    expected_deployment_weights = {
+        "segmenter_map50_95",
+        "segmenter_recall",
+        "classifier_macro_f1",
+        "classifier_min_class_recall",
+    }
+    if set(deployment_weights) != expected_deployment_weights or not math.isclose(
+        sum(float(value) for value in deployment_weights.values()),
+        1.0,
+        abs_tol=1e-6,
+    ):
+        errors.append(
+            "selection.deployment_weights must contain the four documented metrics "
+            "and sum to 1.0"
+        )
+    dagshub_settings = config.get("dagshub", {})
+    for key in ("repo_owner", "repo_name", "experiment_name", "registered_model_name"):
+        if not str(dagshub_settings.get(key, "")).strip():
+            errors.append(f"dagshub.{key} must not be empty")
+    if (
+        float(dagshub_settings.get("promotion", {}).get("min_score_improvement", -1.0))
+        < 0.0
+    ):
+        errors.append("dagshub.promotion.min_score_improvement must be non-negative")
+    for candidate, settings in (
+        config.get("classification", {}).get("candidates", {}).items()
+    ):
+        architecture = str(settings.get("architecture", candidate))
+        if architecture not in CLASSIFIER_ARCHITECTURES:
+            errors.append(
+                f"classification candidate {candidate!r} uses unsupported "
+                f"architecture {architecture!r}"
+            )
     if check_data:
         try:
             records, _ = load_records(
@@ -1295,7 +1815,15 @@ def doctor(config: dict[str, Any], check_data: bool) -> None:
             errors.append(str(error))
 
     packages = {}
-    for name in ("dvc", "torch", "torchvision", "ultralytics", "sklearn"):
+    for name in (
+        "dagshub",
+        "dvc",
+        "mlflow",
+        "torch",
+        "torchvision",
+        "ultralytics",
+        "sklearn",
+    ):
         try:
             module = importlib.import_module(name)
             packages[name] = getattr(module, "__version__", "installed")
@@ -1303,7 +1831,13 @@ def doctor(config: dict[str, Any], check_data: bool) -> None:
             packages[name] = "missing"
     print(
         json.dumps(
-            {"configuration": "ok" if not errors else "invalid", "packages": packages},
+            {
+                "configuration": "ok" if not errors else "invalid",
+                "dagshub_token": (
+                    "configured" if os.getenv("DAGSHUB_USER_TOKEN") else "missing"
+                ),
+                "packages": packages,
+            },
             indent=2,
         )
     )
@@ -1329,11 +1863,20 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "select", help="Select candidates and create a deployment bundle"
     )
+    subparsers.add_parser(
+        "setup-dagshub", help="Configure the DagsHub MLflow and DVC integrations"
+    )
+    subparsers.add_parser(
+        "publish", help="Log the bundle and promote it in the DagsHub Model Registry"
+    )
     predict_parser = subparsers.add_parser(
         "predict", help="Run the selected two-stage pipeline"
     )
     predict_parser.add_argument("--source", required=True, type=Path)
     predict_parser.add_argument("--output", default=Path("runs/predict"), type=Path)
+    predict_parser.add_argument(
+        "--bundle", default=Path("deployment"), type=Path, help="Model bundle path"
+    )
     doctor_parser = subparsers.add_parser(
         "doctor", help="Validate parameters and report dependencies"
     )
@@ -1353,8 +1896,12 @@ def main() -> None:
         train_classifiers(config)
     elif args.command == "select":
         select_models(config)
+    elif args.command == "setup-dagshub":
+        setup_dagshub(config)
+    elif args.command == "publish":
+        publish(config)
     elif args.command == "predict":
-        predict(config, args.source, project_path(args.output))
+        predict(args.source, project_path(args.output), args.bundle)
     elif args.command == "doctor":
         doctor(config, args.check_data)
     else:
