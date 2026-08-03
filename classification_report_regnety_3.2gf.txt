@@ -1,0 +1,10 @@
+              precision    recall  f1-score   support
+
+     Healthy     0.9320    0.9600    0.9458       100
+       Miner     0.7857    0.9900    0.8761       100
+       Phoma     0.9600    0.9600    0.9600       100
+        Rust     0.9859    0.7000    0.8187       100
+
+    accuracy                         0.9025       400
+   macro avg     0.9159    0.9025    0.9002       400
+weighted avg     0.9159    0.9025    0.9002       400
