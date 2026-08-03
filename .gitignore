@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Local DVC internals. `dvc add data/raw` will add the dataset ignore rule.
+.dvc/cache/
+.dvc/tmp/
+.dvc/config.local
+
+# Generated training and tracking artifacts
+outputs/
+metrics/candidate.json
+metrics/promotion.json
+mlruns/
+mlartifacts/
+mlflow.db*
+*.executed.ipynb
+
+# The two legacy checkpoints at the repository root remain tracked.
+# New pipeline runs write checkpoints under outputs/latest instead.
