@@ -10,6 +10,7 @@ from scripts.run_pipeline import (
     fingerprint_dataset,
     prepare_output_directory,
     validate_dataset,
+    validate_model_names,
 )
 
 
@@ -59,6 +60,17 @@ def gate_config() -> dict:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_validate_model_names_accepts_any_non_empty_model_list(self) -> None:
+        self.assertEqual(
+            validate_model_names(["EfficientNetV2-S", "CustomNet"]),
+            ["EfficientNetV2-S", "CustomNet"],
+        )
+
+    def test_validate_model_names_rejects_empty_or_duplicate_values(self) -> None:
+        for value in ([], ["CustomNet", "CustomNet"]):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_model_names(value)
+
     def test_validate_dataset_accepts_expected_structure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             summary = validate_dataset(make_dataset(Path(directory)), CLASSES)
@@ -142,6 +154,7 @@ class PipelineTests(unittest.TestCase):
             )
             config = {
                 "train": {
+                    "models": ["EfficientNetV2-S"],
                     "seed": 42,
                     "batch_size": 32,
                     "epochs": 1,
@@ -158,6 +171,58 @@ class PipelineTests(unittest.TestCase):
                     config,
                     {"dataset_dir": str(dataset)},
                 )
+
+    def test_enrich_metrics_accepts_three_configured_models(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = make_dataset(root)
+            output_dir = root / "outputs" / "latest"
+            output_dir.mkdir(parents=True)
+            metrics_path = root / "metrics" / "candidate.json"
+            metrics_path.parent.mkdir(parents=True)
+            model_names = ["ModelA", "ModelB", "ModelC"]
+            models = [
+                {
+                    "model_name": name,
+                    "best_val_accuracy": 0.90 + index * 0.01,
+                    "test_accuracy": 0.89 + index * 0.01,
+                    "test_macro_f1": 0.88 + index * 0.01,
+                    "checkpoint": f"{name}.pth",
+                }
+                for index, name in enumerate(model_names)
+            ]
+            metrics_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "models": models,
+                        "candidate": models[-1],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "train": {
+                    "models": model_names,
+                    "seed": 42,
+                    "batch_size": 32,
+                    "epochs": 1,
+                    "num_workers": 0,
+                    "val_ratio": 0.15,
+                }
+            }
+
+            enriched = enrich_metrics(
+                metrics_path,
+                root,
+                output_dir,
+                config,
+                {"dataset_dir": str(dataset)},
+            )
+
+        self.assertEqual(enriched["candidate"]["model_name"], "ModelC")
+        self.assertEqual(enriched["train_params"]["models"], model_names)
+        self.assertEqual(len(enriched["models"]), 3)
 
     def test_quality_gate_approves_strict_improvement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

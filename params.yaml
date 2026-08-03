@@ -7,6 +7,9 @@ data:
     - Rust
 
 train:
+  models:
+    - EfficientNetV2-S
+    - RegNetY-3.2GF
   seed: 42
   batch_size: 32
   epochs: 15

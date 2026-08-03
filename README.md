@@ -15,7 +15,7 @@ DVC dataset -> validate -> execute notebook -> MLflow run/artifacts
 ```
 
 GitHub Actions chỉ chạy kiểm tra nhanh. Training vẫn chạy trên máy có GPU, tránh tải
-dataset và huấn luyện hai model trong mỗi pull request.
+dataset và huấn luyện các model trong mỗi pull request.
 
 ## 1. Cài công cụ MLOps
 
@@ -45,6 +45,15 @@ Không commit credential của Azure hoặc remote khác. Nếu cần credential
 environment variables hoặc `.dvc/config.local`.
 
 ## 3. Chạy pipeline
+
+Chọn một hoặc nhiều model trong `params.yaml`:
+
+```yaml
+train:
+  models:
+    - EfficientNetV2-S
+    - RegNetY-3.2GF
+```
 
 Chạy toàn bộ pipeline DVC:
 
@@ -99,11 +108,14 @@ vì so sánh hai metric trên hai tập validation khác nhau.
 
 ## Thay đổi tối thiểu trong notebook
 
-Notebook chỉ thay hai điểm:
+Notebook chỉ thay ba điểm:
 
 1. Đọc dataset path và hyperparameters từ environment variables, vẫn giữ nguyên giá
    trị mặc định cũ khi chạy thủ công.
-2. Xuất model candidate và validation metric vào `MLOPS_METRICS_PATH`.
+2. Chạy tuần tự danh sách `train.models` thay vì tham chiếu hai biến kết quả cố định.
+3. Xuất model candidate và validation metric vào `MLOPS_METRICS_PATH`.
 
 Model architecture, augmentation, optimizer, training loop, checkpoint format và báo
-cáo cũ không bị refactor.
+cáo cũ không bị refactor. Muốn thêm kiến trúc hoàn toàn mới, chỉ cần thêm logic tạo
+model trong `build_model()`, rồi thêm tên vào `train.models`; pipeline DVC, MLflow và
+quality gate không cần sửa.

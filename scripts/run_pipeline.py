@@ -30,6 +30,18 @@ def load_config(path: Path) -> dict[str, Any]:
     return config
 
 
+def validate_model_names(value: Any) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("train.models must be a non-empty list of model names")
+    if any(not isinstance(name, str) or not name.strip() for name in value):
+        raise ValueError("Every train.models item must be a non-empty string")
+
+    model_names = [name.strip() for name in value]
+    if len(model_names) != len(set(model_names)):
+        raise ValueError("train.models must not contain duplicate model names")
+    return model_names
+
+
 def resolve_from_root(repo_root: Path, value: str) -> Path:
     path = Path(value).expanduser()
     return path.resolve() if path.is_absolute() else (repo_root / path).resolve()
@@ -161,6 +173,7 @@ def execute_notebook(
     dataset_dir: Path,
     train_config: dict[str, Any],
 ) -> Path:
+    model_names = validate_model_names(train_config.get("models"))
     prepare_output_directory(repo_root, output_dir)
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
     metrics_path.unlink(missing_ok=True)
@@ -178,6 +191,7 @@ def execute_notebook(
             "NUM_EPOCHS": str(train_config["epochs"]),
             "NUM_WORKERS": str(train_config["num_workers"]),
             "VAL_RATIO_FROM_TRAIN": str(train_config["val_ratio"]),
+            "MODEL_NAMES": json.dumps(model_names),
             "MLOPS_METRICS_PATH": str(metrics_path),
             "MPLBACKEND": "Agg",
         }
@@ -220,6 +234,7 @@ def enrich_metrics(
     data_version = read_data_version(repo_root, Path(dataset_summary["dataset_dir"]))
     git_sha = get_git_sha(repo_root)
     train_config = config["train"]
+    model_names = validate_model_names(train_config.get("models"))
     eval_version = evaluation_version(
         data_version,
         int(train_config["seed"]),
@@ -229,6 +244,11 @@ def enrich_metrics(
     for model in payload["models"]:
         model["checkpoint"] = str(
             (output_dir / model["checkpoint"]).relative_to(repo_root).as_posix()
+        )
+    reported_names = [model["model_name"] for model in payload["models"]]
+    if reported_names != model_names:
+        raise ValueError(
+            f"Notebook reported models {reported_names}, expected {model_names}"
         )
     selected_name = payload["candidate"]["model_name"]
     matched_candidate = next(
@@ -256,6 +276,7 @@ def enrich_metrics(
             },
         }
     )
+    payload["train_params"]["models"] = model_names
     write_json(metrics_path, payload)
     return payload
 
@@ -291,7 +312,9 @@ def log_mlflow_run(
 
     candidate = payload["candidate"]
     with mlflow.start_run(run_name=f"{candidate['model_name']} candidate") as run:
-        mlflow.log_params(payload["train_params"])
+        mlflow_params = payload["train_params"].copy()
+        mlflow_params["models"] = json.dumps(mlflow_params["models"])
+        mlflow.log_params(mlflow_params)
         mlflow.log_param("candidate_model", candidate["model_name"])
         mlflow.log_param("data_version", payload["data_version"])
         mlflow.log_param("evaluation_version", payload["evaluation_version"])

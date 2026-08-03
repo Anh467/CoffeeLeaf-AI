@@ -17,13 +17,18 @@ class NotebookContractTests(unittest.TestCase):
 
         self.assertIn('os.getenv("DATASET_DIR"', source)
         self.assertIn('os.getenv("NUM_EPOCHS"', source)
+        self.assertIn('os.getenv("MODEL_NAMES"', source)
         self.assertIn('os.getenv("MLOPS_METRICS_PATH"', source)
+        self.assertIn("for model_name in MODEL_NAMES[1:]", source)
+        self.assertIn("display_research_report(experiment_results)", source)
+        self.assertIn("for res in experiment_results", source)
         self.assertIn('"schema_version": 1', source)
         self.assertIn('"models": mlops_models', source)
         self.assertIn('"candidate": max(mlops_models', source)
         self.assertIn('"model_name": res["model_name"]', source)
         self.assertIn('"best_val_accuracy"', source)
         self.assertIn('"checkpoint":', source)
+        self.assertNotIn("[effnet_res, regnet_res]", source)
 
 
 if __name__ == "__main__":
