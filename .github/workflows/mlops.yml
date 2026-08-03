@@ -1,0 +1,57 @@
+name: MLOps training
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: Model to train
+        required: true
+        type: choice
+        options: [classification, detection]
+      epochs:
+        required: true
+        default: "20"
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: python -m py_compile train.py predict.py
+
+  train:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install -r requirements.txt
+      - name: Configure tracking and Kaggle
+        env:
+          KAGGLE_JSON: ${{ secrets.KAGGLE_JSON }}
+        run: |
+          mkdir -p ~/.kaggle
+          printf '%s' "$KAGGLE_JSON" > ~/.kaggle/kaggle.json
+          chmod 600 ~/.kaggle/kaggle.json
+      - name: Download selected datasets
+        run: |
+          mkdir -p data/classification/source_1 data/classification/source_2 data/detection
+          kaggle datasets download -d coffeedisease/coffee-leaves-disease -p data/classification/source_1 --unzip
+          kaggle datasets download -d nirmalsankalana/rocole-a-robusta-coffee-leaf-images-dataset -p data/classification/source_2 --unzip
+          kaggle datasets download -d alexo98/leaf-detection -p data/detection --unzip
+      - name: Train
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          MLFLOW_TRACKING_USERNAME: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
+          MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
+        run: |
+          if [ "${{ inputs.task }}" = "classification" ]; then
+            python train.py classify --data data/classification --model efficientnet_v2_s --epochs "${{ inputs.epochs }}" --dataset-sources "coffeedisease/coffee-leaves-disease,nirmalsankalana/rocole"
+          else
+            python train.py prepare-detection --data data/detection --output data/detection_yolo
+            python train.py detect --data data/detection_yolo/data.yaml --model yolov8n.pt --epochs "${{ inputs.epochs }}" --dataset-sources "alexo98/leaf-detection"
+          fi
