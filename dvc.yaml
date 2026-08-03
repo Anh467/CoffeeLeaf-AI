@@ -1,0 +1,29 @@
+stages:
+  train:
+    cmd: python scripts/run_pipeline.py --config params.yaml
+    deps:
+      - coffee_leaf_experiment.ipynb
+      - scripts/run_pipeline.py
+      - data/raw
+    params:
+      - data
+      - train
+      - output
+      - mlflow
+    outs:
+      - outputs/latest
+    metrics:
+      - metrics/candidate.json:
+          cache: false
+
+  quality_gate:
+    cmd: python scripts/quality_gate.py --config params.yaml
+    deps:
+      - scripts/quality_gate.py
+      - metrics/candidate.json
+      - metrics/champion.json
+    params:
+      - quality_gate
+    metrics:
+      - metrics/promotion.json:
+          cache: false

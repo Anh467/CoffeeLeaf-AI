@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "model_name": "EfficientNetV2-S",
+  "best_val_accuracy": 0.9958333333333333,
+  "test_accuracy": 0.9525,
+  "test_macro_f1": 0.9521,
+  "model_uri": "git+https://github.com/Anh467/CoffeeLeaf-AI@85b39e3c4ed79ee9d75f11d03e439817c49d78b7#best_efficientnetv2_s_model.pth",
+  "mlflow_run_id": null,
+  "git_sha": "85b39e3c4ed79ee9d75f11d03e439817c49d78b7",
+  "data_version": "legacy-untracked",
+  "evaluation_version": null,
+  "promoted_at": null
+}
