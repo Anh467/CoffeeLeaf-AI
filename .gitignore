@@ -1,0 +1,13 @@
+data/
+artifacts/
+runs/
+mlruns/
+.env
+.venv/
+__pycache__/
+*.py[cod]
+*.pt
+*.pth
+*.onnx
+*.zip
+.kaggle/
