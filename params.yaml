@@ -1,0 +1,31 @@
+data:
+  path: data/raw
+  expected_classes:
+    - Healthy
+    - Miner
+    - Phoma
+    - Rust
+
+train:
+  seed: 42
+  batch_size: 32
+  epochs: 15
+  num_workers: 0
+  val_ratio: 0.15
+  kernel_name: python3
+
+output:
+  directory: outputs/latest
+  candidate_metrics: metrics/candidate.json
+
+mlflow:
+  enabled: true
+  tracking_uri: sqlite:///mlflow.db
+  experiment_name: coffee-leaf-classification
+
+quality_gate:
+  champion_manifest: metrics/champion.json
+  report: metrics/promotion.json
+  minimum_val_accuracy: 0.90
+  minimum_improvement: 0.0
+  require_same_evaluation_version: true
