@@ -26,9 +26,13 @@ stages:
           cache: false
 
   train_segmenters:
-    cmd: python pipeline.py train-segmenters
+    cmd: >-
+      papermill notebooks/train_leaf_segmentation.ipynb
+      notebooks/train_leaf_segmentation.executed.ipynb
+      --cwd . -p params_path params.yaml
     deps:
       - pipeline.py
+      - notebooks/train_leaf_segmentation.ipynb
       - data/processed/segmentation
     params:
       - seed
@@ -45,9 +49,13 @@ stages:
           y: map50_95
 
   train_classifiers:
-    cmd: python pipeline.py train-classifiers
+    cmd: >-
+      papermill notebooks/train_disease_classification.ipynb
+      notebooks/train_disease_classification.executed.ipynb
+      --cwd . -p params_path params.yaml
     deps:
       - pipeline.py
+      - notebooks/train_disease_classification.ipynb
       - data/processed/classification
     params:
       - seed

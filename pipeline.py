@@ -2,9 +2,9 @@
 
 The same YOLO-seg annotation is used twice: class ids describe disease states in
 raw data, while ``prepare`` produces a class-agnostic leaf segmentation dataset
-and masked leaf crops for classification.  Heavy ML dependencies are imported
-inside training/inference commands so data preparation and configuration checks
-remain lightweight.
+and masked leaf crops for classification. DVC executes the two training
+notebooks; this module owns preparation, model selection, registry publishing,
+inference and the shared classifier contract.
 """
 
 from __future__ import annotations
@@ -19,8 +19,6 @@ import os
 import random
 import shutil
 import subprocess
-import tempfile
-import time
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -447,144 +445,6 @@ def prepare(config: dict[str, Any]) -> None:
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
 
 
-def nested_attr(obj: Any, path: str, default: float = 0.0) -> float:
-    current = obj
-    for name in path.split("."):
-        if current is None:
-            return default
-        current = getattr(current, name, None)
-    try:
-        return float(current)
-    except (TypeError, ValueError):
-        return default
-
-
-def runtime_yolo_yaml(segment_root: Path) -> Path:
-    payload = {
-        "path": str(segment_root.resolve()),
-        "train": "images/train",
-        "val": "images/val",
-        "test": "images/test",
-        "names": {0: "leaf"},
-    }
-    with tempfile.NamedTemporaryFile(
-        "w", suffix=".yaml", encoding="utf-8", delete=False
-    ) as handle:
-        yaml.safe_dump(payload, handle, sort_keys=False)
-        path = Path(handle.name)
-    return path
-
-
-def resolve_device(value: Any) -> Any:
-    if str(value).lower() == "auto":
-        return None
-    return value
-
-
-def train_segmenters(config: dict[str, Any]) -> None:
-    try:
-        import torch
-        from ultralytics import YOLO
-    except ImportError as error:
-        raise RuntimeError(
-            "Install requirements.txt before training segmenters"
-        ) from error
-
-    seed = int(config["seed"])
-    seed_everything(seed)
-    settings = config["segmentation"]
-    segment_root = project_path(config["data"]["processed_dir"]) / "segmentation"
-    output_dir = reset_dir(ROOT / "models" / "segmenters")
-    data_yaml = runtime_yolo_yaml(segment_root)
-    metrics_by_candidate: dict[str, dict[str, Any]] = {}
-    rows: list[dict[str, Any]] = []
-
-    try:
-        for candidate, pretrained_weights in settings["candidates"].items():
-            print(f"\n=== Training segmenter: {candidate} ===")
-            source = str(pretrained_weights)
-            if not bool(settings.get("pretrained", True)) and source.endswith(".pt"):
-                source = source[:-3] + ".yaml"
-            model = YOLO(source)
-            with tempfile.TemporaryDirectory(prefix=f"coffee-{candidate}-") as run_dir:
-                kwargs: dict[str, Any] = {
-                    "data": str(data_yaml),
-                    "epochs": int(settings["epochs"]),
-                    "imgsz": int(settings["image_size"]),
-                    "batch": int(settings["batch_size"]),
-                    "patience": int(settings["patience"]),
-                    "workers": int(settings["workers"]),
-                    "seed": seed,
-                    "deterministic": bool(settings["deterministic"]),
-                    "project": run_dir,
-                    "name": candidate,
-                    "exist_ok": True,
-                    "verbose": True,
-                }
-                device = resolve_device(settings.get("device", "auto"))
-                if device is not None:
-                    kwargs["device"] = device
-                model.train(**kwargs)
-                best_path = Path(model.trainer.best)
-                if not best_path.exists():
-                    raise RuntimeError(
-                        f"Ultralytics did not create best weights for {candidate}"
-                    )
-                target = output_dir / f"{candidate}.pt"
-                shutil.copy2(best_path, target)
-
-            best_model = YOLO(str(target))
-            validation = best_model.val(
-                data=str(data_yaml),
-                split="val",
-                imgsz=int(settings["image_size"]),
-                batch=int(settings["batch_size"]),
-                workers=int(settings["workers"]),
-                verbose=False,
-            )
-            test_result = best_model.val(
-                data=str(data_yaml),
-                split="test",
-                imgsz=int(settings["image_size"]),
-                batch=int(settings["batch_size"]),
-                workers=int(settings["workers"]),
-                verbose=False,
-            )
-            speed = getattr(validation, "speed", {}) or {}
-            values = {
-                "map50_95": nested_attr(validation, "seg.map"),
-                "map50": nested_attr(validation, "seg.map50"),
-                "precision": nested_attr(validation, "seg.mp"),
-                "recall": nested_attr(validation, "seg.mr"),
-                "test_map50_95": nested_attr(test_result, "seg.map"),
-                "test_map50": nested_attr(test_result, "seg.map50"),
-                "test_precision": nested_attr(test_result, "seg.mp"),
-                "test_recall": nested_attr(test_result, "seg.mr"),
-                "latency_ms": float(speed.get("inference", 0.0)),
-                "size_mb": target.stat().st_size / (1024 * 1024),
-                "image_size": int(settings["image_size"]),
-            }
-            metrics_by_candidate[candidate] = values
-            rows.append(
-                {
-                    "candidate": candidate,
-                    **{
-                        key: values[key]
-                        for key in ("map50_95", "recall", "latency_ms", "size_mb")
-                    },
-                }
-            )
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-    finally:
-        data_yaml.unlink(missing_ok=True)
-
-    write_json(
-        ROOT / "metrics" / "segmenters.json", {"candidates": metrics_by_candidate}
-    )
-    write_csv(ROOT / "metrics" / "segmenters.csv", rows)
-
-
 def build_classifier(
     name: str,
     number_of_classes: int,
@@ -636,329 +496,6 @@ def build_classifier(
     for parameter in head.parameters():
         parameter.requires_grad = True
     return model, head
-
-
-class LeafCropDataset:
-    """Small ImageFolder equivalent with a stable class mapping across splits."""
-
-    def __init__(self, root: Path, classes: Sequence[str], transform: Any) -> None:
-        self.transform = transform
-        self.samples: list[tuple[Path, int]] = []
-        for class_id, class_name in enumerate(classes):
-            class_dir = root / class_name
-            if not class_dir.exists():
-                raise ValueError(f"Missing class directory: {class_dir}")
-            images = [
-                path
-                for path in sorted(class_dir.iterdir())
-                if path.suffix.lower() in IMAGE_EXTENSIONS
-            ]
-            if not images:
-                raise ValueError(f"Class directory is empty: {class_dir}")
-            self.samples.extend((path, class_id) for path in images)
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __getitem__(self, index: int) -> tuple[Any, int]:
-        path, target = self.samples[index]
-        with Image.open(path) as source:
-            image = source.convert("RGB")
-        return self.transform(image), target
-
-
-def classifier_transforms(image_size: int) -> tuple[Any, Any]:
-    from torchvision import transforms
-
-    train_transform = transforms.Compose(
-        [
-            transforms.Resize((image_size, image_size)),
-            transforms.RandomHorizontalFlip(0.5),
-            transforms.RandomVerticalFlip(0.5),
-            transforms.RandomRotation(20),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-            transforms.ToTensor(),
-            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-        ]
-    )
-    evaluation_transform = transforms.Compose(
-        [
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-        ]
-    )
-    return train_transform, evaluation_transform
-
-
-def evaluate_classifier(
-    model: Any, loader: Any, device: Any, criterion: Any = None
-) -> dict[str, Any]:
-    import torch
-    from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-
-    model.eval()
-    targets: list[int] = []
-    predictions: list[int] = []
-    total_loss = 0.0
-    with torch.inference_mode():
-        for inputs, labels in loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            logits = model(inputs)
-            if criterion is not None:
-                total_loss += float(criterion(logits, labels).item()) * labels.size(0)
-            predictions.extend(logits.argmax(1).cpu().tolist())
-            targets.extend(labels.cpu().tolist())
-    labels_index = (
-        list(range(len(loader.dataset.classes)))
-        if hasattr(loader.dataset, "classes")
-        else sorted(set(targets))
-    )
-    precision, recall, f1, support = precision_recall_fscore_support(
-        targets, predictions, labels=labels_index, zero_division=0
-    )
-    return {
-        "loss": total_loss / max(1, len(targets)),
-        "accuracy": float(accuracy_score(targets, predictions)),
-        "precision": precision.tolist(),
-        "recall": recall.tolist(),
-        "f1": f1.tolist(),
-        "support": support.tolist(),
-        "macro_f1": float(np.mean(f1)),
-        "targets": targets,
-        "predictions": predictions,
-    }
-
-
-def train_classifiers(config: dict[str, Any]) -> None:
-    try:
-        import torch
-        from sklearn.metrics import confusion_matrix
-        from torch import nn
-        from torch.utils.data import DataLoader
-    except ImportError as error:
-        raise RuntimeError(
-            "Install requirements.txt before training classifiers"
-        ) from error
-
-    seed = int(config["seed"])
-    seed_everything(seed)
-    settings = config["classification"]
-    classes = list(config["data"]["classes"])
-    data_root = project_path(config["data"]["processed_dir"]) / "classification"
-    output_dir = reset_dir(ROOT / "models" / "classifiers")
-    metrics_by_candidate: dict[str, dict[str, Any]] = {}
-    comparison_rows: list[dict[str, Any]] = []
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    for candidate, candidate_settings in settings["candidates"].items():
-        print(f"\n=== Training classifier: {candidate} ===")
-        architecture = str(candidate_settings.get("architecture", candidate))
-        image_size = int(candidate_settings["image_size"])
-        train_transform, eval_transform = classifier_transforms(image_size)
-        train_dataset = LeafCropDataset(data_root / "train", classes, train_transform)
-        val_dataset = LeafCropDataset(data_root / "val", classes, eval_transform)
-        test_dataset = LeafCropDataset(data_root / "test", classes, eval_transform)
-        # Used by evaluate_classifier without relying on ImageFolder internals.
-        train_dataset.classes = classes
-        val_dataset.classes = classes
-        test_dataset.classes = classes
-        generator = torch.Generator().manual_seed(seed)
-        loader_args = {
-            "batch_size": int(settings["batch_size"]),
-            "num_workers": int(settings["workers"]),
-            "pin_memory": device.type == "cuda",
-        }
-        train_loader = DataLoader(
-            train_dataset, shuffle=True, generator=generator, **loader_args
-        )
-        val_loader = DataLoader(val_dataset, shuffle=False, **loader_args)
-        test_loader = DataLoader(test_dataset, shuffle=False, **loader_args)
-
-        model, head = build_classifier(
-            architecture,
-            len(classes),
-            float(candidate_settings["dropout"]),
-            int(candidate_settings["unfreeze_blocks"]),
-            bool(settings["pretrained"]),
-        )
-        model.to(device)
-        counts = Counter(target for _, target in train_dataset.samples)
-        class_weights = torch.tensor(
-            [
-                len(train_dataset) / (len(classes) * counts[index])
-                for index in range(len(classes))
-            ],
-            dtype=torch.float32,
-            device=device,
-        )
-        criterion = nn.CrossEntropyLoss(
-            weight=class_weights,
-            label_smoothing=float(settings["label_smoothing"]),
-        )
-        head_ids = {id(parameter) for parameter in head.parameters()}
-        backbone_parameters = [
-            parameter
-            for parameter in model.parameters()
-            if parameter.requires_grad and id(parameter) not in head_ids
-        ]
-        optimizer = torch.optim.AdamW(
-            [
-                {"params": backbone_parameters, "lr": float(settings["backbone_lr"])},
-                {"params": list(head.parameters()), "lr": float(settings["head_lr"])},
-            ],
-            weight_decay=float(settings["weight_decay"]),
-        )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=int(settings["epochs"]), eta_min=1e-6
-        )
-        use_amp = device.type == "cuda"
-        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-        target_path = output_dir / f"{candidate}.pt"
-        history: list[dict[str, Any]] = []
-        best_macro_f1 = -1.0
-        stale_epochs = 0
-
-        for epoch in range(1, int(settings["epochs"]) + 1):
-            model.train()
-            train_loss = 0.0
-            train_correct = 0
-            train_total = 0
-            for inputs, labels in train_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
-                optimizer.zero_grad(set_to_none=True)
-                with torch.autocast(
-                    device_type=device.type, dtype=torch.float16, enabled=use_amp
-                ):
-                    logits = model(inputs)
-                    loss = criterion(logits, labels)
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-                train_loss += float(loss.item()) * labels.size(0)
-                train_correct += int((logits.argmax(1) == labels).sum().item())
-                train_total += labels.size(0)
-            scheduler.step()
-            validation = evaluate_classifier(model, val_loader, device, criterion)
-            epoch_row = {
-                "epoch": epoch,
-                "train_loss": train_loss / max(1, train_total),
-                "train_accuracy": train_correct / max(1, train_total),
-                "val_loss": validation["loss"],
-                "val_macro_f1": validation["macro_f1"],
-            }
-            history.append(epoch_row)
-            print(
-                f"epoch={epoch:03d} train_loss={epoch_row['train_loss']:.4f} "
-                f"val_loss={epoch_row['val_loss']:.4f} val_f1={epoch_row['val_macro_f1']:.4f}"
-            )
-            if validation["macro_f1"] > best_macro_f1 + 1e-6:
-                best_macro_f1 = validation["macro_f1"]
-                stale_epochs = 0
-                torch.save(
-                    {
-                        "model_name": architecture,
-                        "candidate_name": candidate,
-                        "state_dict": model.state_dict(),
-                        "classes": classes,
-                        "image_size": image_size,
-                        "dropout": float(candidate_settings["dropout"]),
-                        "unfreeze_blocks": int(candidate_settings["unfreeze_blocks"]),
-                    },
-                    target_path,
-                )
-            else:
-                stale_epochs += 1
-                if stale_epochs >= int(settings["patience"]):
-                    break
-
-        write_csv(output_dir / f"{candidate}_history.csv", history)
-        checkpoint = torch.load(target_path, map_location=device, weights_only=False)
-        model.load_state_dict(checkpoint["state_dict"])
-        validation_result = evaluate_classifier(model, val_loader, device, criterion)
-        test_result = evaluate_classifier(model, test_loader, device, criterion)
-        matrix = confusion_matrix(
-            test_result["targets"],
-            test_result["predictions"],
-            labels=list(range(len(classes))),
-        ).tolist()
-
-        sample, _ = test_dataset[0]
-        sample = sample.unsqueeze(0).to(device)
-        model.eval()
-        with torch.inference_mode():
-            for _ in range(5):
-                model(sample)
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-            started = time.perf_counter()
-            for _ in range(30):
-                model(sample)
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-        latency_ms = (time.perf_counter() - started) * 1000 / 30
-
-        validation_per_class = {
-            name: {
-                "precision": float(validation_result["precision"][index]),
-                "recall": float(validation_result["recall"][index]),
-                "f1": float(validation_result["f1"][index]),
-                "support": int(validation_result["support"][index]),
-            }
-            for index, name in enumerate(classes)
-        }
-        test_per_class = {
-            name: {
-                "precision": float(test_result["precision"][index]),
-                "recall": float(test_result["recall"][index]),
-                "f1": float(test_result["f1"][index]),
-                "support": int(test_result["support"][index]),
-            }
-            for index, name in enumerate(classes)
-        }
-        write_json(
-            output_dir / f"{candidate}_report.json",
-            {
-                "validation_per_class": validation_per_class,
-                "test_per_class": test_per_class,
-                "test_confusion_matrix": matrix,
-            },
-        )
-        values = {
-            "accuracy": validation_result["accuracy"],
-            "macro_f1": validation_result["macro_f1"],
-            "min_class_recall": min(
-                item["recall"] for item in validation_per_class.values()
-            ),
-            "test_accuracy": test_result["accuracy"],
-            "test_macro_f1": test_result["macro_f1"],
-            "test_min_class_recall": min(
-                item["recall"] for item in test_per_class.values()
-            ),
-            "latency_ms": latency_ms,
-            "size_mb": target_path.stat().st_size / (1024 * 1024),
-            "image_size": image_size,
-            "validation_per_class": validation_per_class,
-            "test_per_class": test_per_class,
-        }
-        metrics_by_candidate[candidate] = values
-        comparison_rows.append(
-            {
-                "candidate": candidate,
-                **{
-                    key: values[key]
-                    for key in ("macro_f1", "min_class_recall", "latency_ms", "size_mb")
-                },
-            }
-        )
-        del model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    write_json(
-        ROOT / "metrics" / "classifiers.json", {"candidates": metrics_by_candidate}
-    )
-    write_csv(ROOT / "metrics" / "classifiers.csv", comparison_rows)
 
 
 def lower_is_better(value: float, values: Sequence[float]) -> float:
@@ -1818,6 +1355,9 @@ def doctor(config: dict[str, Any], check_data: bool) -> None:
     for name in (
         "dagshub",
         "dvc",
+        "papermill",
+        "ipykernel",
+        "jupyterlab",
         "mlflow",
         "torch",
         "torchvision",
@@ -1855,12 +1395,6 @@ def build_parser() -> argparse.ArgumentParser:
         "prepare", help="Validate annotations and build both processed datasets"
     )
     subparsers.add_parser(
-        "train-segmenters", help="Train and benchmark segmentation candidates"
-    )
-    subparsers.add_parser(
-        "train-classifiers", help="Train and benchmark classification candidates"
-    )
-    subparsers.add_parser(
         "select", help="Select candidates and create a deployment bundle"
     )
     subparsers.add_parser(
@@ -1890,10 +1424,6 @@ def main() -> None:
     config = load_config(args.params)
     if args.command == "prepare":
         prepare(config)
-    elif args.command == "train-segmenters":
-        train_segmenters(config)
-    elif args.command == "train-classifiers":
-        train_classifiers(config)
     elif args.command == "select":
         select_models(config)
     elif args.command == "setup-dagshub":

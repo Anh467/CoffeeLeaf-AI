@@ -18,18 +18,20 @@ vào nhãn bệnh do detector dự đoán.
 ## Cấu trúc tối giản
 
 ```text
-pipeline.py       # prepare, train, select, publish, inference và doctor
+notebooks/train_leaf_segmentation.ipynb      # training YOLO segmentation
+notebooks/train_disease_classification.ipynb # training classifier
+pipeline.py       # prepare, select, publish, inference, doctor và model contract
 params.yaml       # dữ liệu, hyperparameters, quality gates
-dvc.yaml          # DAG: prepare -> train hai nhánh -> select -> publish
+dvc.yaml          # DAG: prepare -> hai notebook train -> select -> publish
 data/raw/         # dữ liệu gốc do DVC quản lý, không commit ảnh vào Git
 metrics/          # JSON/CSV nhỏ để DVC so sánh thí nghiệm
 models/           # checkpoint ứng viên do DVC cache
 deployment/       # cặp model thắng + manifest/checksum do DVC cache
 ```
 
-Notebook và checkpoint cũ chỉ giải quyết classification trên từng lá đã crop;
-pipeline mới thay thế luồng đó để tránh nhầm accuracy ảnh một lá với hiệu năng
-thực tế trên ảnh toàn cây.
+Hai notebook chứa training loop thật và có thể mở bằng JupyterLab để theo dõi.
+DVC chạy chính các notebook này bằng Papermill ở chế độ headless, vì vậy notebook
+không phải bước thủ công nằm ngoài pipeline và không làm mất khả năng tái lập.
 
 ## 1. Chuẩn bị môi trường
 
@@ -120,13 +122,26 @@ Các stage:
 
 - `prepare`: kiểm tra polygon/split, tạo nhãn segmentation một lớp `leaf`, mask
   nền ngoài polygon và sinh crop classification.
-- `train_segmenters`: mặc định so sánh `yolo11n-seg` và `yolo11s-seg` trên validation.
-- `train_classifiers`: mặc định so sánh EfficientNetV2-S và RegNetY-3.2GF.
+- `train_segmenters`: Papermill thực thi `train_leaf_segmentation.ipynb`, mặc
+  định so sánh `yolo11n-seg` và `yolo11s-seg` trên validation.
+- `train_classifiers`: Papermill thực thi
+  `train_disease_classification.ipynb`, mặc định so sánh EfficientNetV2-S và
+  RegNetY-3.2GF.
 - `select`: quality gate trước, sau đó tính điểm tổng hợp giữa chất lượng,
   latency và kích thước checkpoint.
 - `publish`: log bundle/params/metrics/fingerprint lên DagsHub MLflow, so sánh
   challenger với model `Production`, rồi promote theo chính sách trong
   `params.yaml`.
+
+Muốn xem và chạy từng training loop tương tác, mở notebook từ repository root:
+
+```bash
+jupyter lab notebooks
+```
+
+Trước khi chạy notebook thủ công, hãy chạy `dvc repro prepare`. Cách được khuyến
+nghị để ghi đúng cache/dependency vẫn là `dvc repro train_segmenters`,
+`dvc repro train_classifiers` hoặc toàn bộ `dvc repro`.
 
 Thay hyperparameter rồi chạy một DVC experiment:
 
@@ -249,6 +264,8 @@ Tỉ lệ lá bệnh chỉ là chỉ báo thị giác, không thay thế đánh 
 
 ```bash
 python -m py_compile pipeline.py
+python -c "import json; json.load(open('notebooks/train_leaf_segmentation.ipynb', encoding='utf-8'))"
+python -c "import json; json.load(open('notebooks/train_disease_classification.ipynb', encoding='utf-8'))"
 python pipeline.py doctor
 python pipeline.py doctor --check-data
 dvc dag
