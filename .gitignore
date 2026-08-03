@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.idea/
+.vscode/
+runs/
+mlruns/
+
+# DVC owns processed data and generated model bundles. `dvc add data/raw`
+# adds the raw dataset ignore rule only after it has created data/raw.dvc.
+data/processed/
+models/
+deployment/
+.dvc/cache/
+.dvc/tmp/

@@ -1,0 +1,107 @@
+artifacts:
+  coffee-leaf-segmenter:
+    path: deployment/leaf_segmenter.pt
+    type: model
+    desc: Class-agnostic instance segmentation model for leaves in whole-tree images.
+    labels: [pytorch, ultralytics, segmentation]
+  coffee-disease-classifier:
+    path: deployment/leaf_classifier.pt
+    type: model
+    desc: Disease classifier applied to masked leaf instances.
+    labels: [pytorch, torchvision, classification]
+
+stages:
+  prepare:
+    cmd: python pipeline.py prepare
+    deps:
+      - pipeline.py
+      - data/raw
+    params:
+      - seed
+      - data
+    outs:
+      - data/processed
+    metrics:
+      - metrics/data.json:
+          cache: false
+
+  train_segmenters:
+    cmd: python pipeline.py train-segmenters
+    deps:
+      - pipeline.py
+      - data/processed/segmentation
+    params:
+      - seed
+      - segmentation
+    outs:
+      - models/segmenters
+    metrics:
+      - metrics/segmenters.json:
+          cache: false
+    plots:
+      - metrics/segmenters.csv:
+          cache: false
+          x: candidate
+          y: map50_95
+
+  train_classifiers:
+    cmd: python pipeline.py train-classifiers
+    deps:
+      - pipeline.py
+      - data/processed/classification
+    params:
+      - seed
+      - classification
+      - data.classes
+    outs:
+      - models/classifiers
+    metrics:
+      - metrics/classifiers.json:
+          cache: false
+    plots:
+      - metrics/classifiers.csv:
+          cache: false
+          x: candidate
+          y: macro_f1
+
+  select:
+    cmd: python pipeline.py select
+    deps:
+      - pipeline.py
+      - models/segmenters
+      - models/classifiers
+      - metrics/segmenters.json
+      - metrics/classifiers.json
+      - data/processed/dataset_manifest.json
+    params:
+      - data.classes
+      - classification.candidates
+      - selection
+      - deployment
+    outs:
+      - deployment
+    metrics:
+      - metrics/selection.json:
+          cache: false
+    plots:
+      - metrics/leaderboard.csv:
+          cache: false
+          x: candidate
+          y: score
+
+  publish:
+    cmd: python pipeline.py publish
+    # Re-check external Registry state/branch even when the bundle is unchanged.
+    always_changed: true
+    deps:
+      - pipeline.py
+      - deployment
+      - metrics/data.json
+      - metrics/segmenters.json
+      - metrics/classifiers.json
+      - metrics/selection.json
+    params:
+      - dagshub
+    metrics:
+      - metrics/publish.json:
+          cache: false

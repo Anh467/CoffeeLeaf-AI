@@ -1,3 +1,0 @@
-Model,Test Acc (%),Precision (Macro),Recall (Macro),F1 (Macro),Params (M),Trainable Params (M),Model Size (MB),Latency (ms/img),FPS,Max VRAM (MB),Train Time (s),Delta Loss
-EfficientNetV2-S,95.25,0.9569,0.9525,0.9521,20.18,18.36,77.86,15.46,64.7,400.3,423.7,0.002
-RegNetY-3.2GF,90.25,0.9159,0.9025,0.9002,17.93,4.81,68.83,14.61,68.4,324.7,379.1,0.0172
