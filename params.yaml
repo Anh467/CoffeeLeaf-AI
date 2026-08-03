@@ -1,0 +1,65 @@
+seed: 42
+data:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  splits: [train, val, test]
+  classes: [healthy, miner, phoma, rust]
+  require_group_manifest: true
+  mask_background: true
+  mask_fill_rgb: [124, 116, 104]
+  crop_padding_ratio: 0.05
+  min_crop_size: 32
+segmentation:
+  candidates:
+    yolo11n_seg: yolo11n-seg.pt
+    yolo11s_seg: yolo11s-seg.pt
+  image_size: 1280
+  epochs: 100
+  batch_size: 4
+  patience: 20
+  workers: 4
+  device: auto
+  pretrained: true
+  deterministic: true
+classification:
+  candidates:
+    efficientnet_v2_s:
+      image_size: 300
+      dropout: 0.4
+      unfreeze_blocks: 3
+    regnet_y_3_2gf:
+      image_size: 224
+      dropout: 0.3
+      unfreeze_blocks: 1
+  epochs: 20
+  batch_size: 32
+  workers: 4
+  pretrained: true
+  backbone_lr: 1.0e-05
+  head_lr: 0.001
+  weight_decay: 0.01
+  label_smoothing: 0.1
+  patience: 6
+selection:
+  segmentation:
+    min_map50_95: 0.45
+    min_recall: 0.65
+    weights:
+      map50_95: 0.70
+      recall: 0.2
+      latency: 0.07
+      size: 0.03
+  classification:
+    min_macro_f1: 0.85
+    min_class_recall: 0.7
+    weights:
+      macro_f1: 0.70
+      min_class_recall: 0.2
+      latency: 0.07
+      size: 0.03
+deployment:
+  detector_confidence: 0.25
+  classifier_confidence: 0.5
+  image_size: 1280
+  export_onnx: false
+  onnx_opset: 17
