@@ -5,6 +5,7 @@ __pycache__/
 .vscode/
 runs/
 mlruns/
+notebooks/*.executed.ipynb
 
 # DVC owns processed data and generated model bundles. `dvc add data/raw`
 # adds the raw dataset ignore rule only after it has created data/raw.dvc.
