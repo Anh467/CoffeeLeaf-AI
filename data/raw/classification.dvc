@@ -1,0 +1,6 @@
+outs:
+- md5: ba36d4e5086a978bc82f25c2cd5280cc.dir
+  size: 256664275
+  nfiles: 8610
+  hash: md5
+  path: classification
