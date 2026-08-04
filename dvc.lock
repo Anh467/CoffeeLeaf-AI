@@ -1,0 +1,73 @@
+schema: '2.0'
+stages:
+  prepare:
+    cmd: python pipeline.py prepare
+    deps:
+    - path: data/raw/classification
+      hash: md5
+      md5: ba36d4e5086a978bc82f25c2cd5280cc.dir
+      size: 256664275
+      nfiles: 8610
+    - path: data/raw/segmentation
+      hash: md5
+      md5: 07be637858a407fd5506555502b84c3a.dir
+      size: 1240105191
+      nfiles: 306
+    - path: pipeline.py
+      hash: md5
+      md5: 962418236b75d378506dc16fa21f55c4
+      size: 84573
+    params:
+      params.yaml:
+        data:
+          processed_dir: data/processed
+          splits:
+          - train
+          - val
+          - test
+          healthy_label: healthy
+          disease_classes:
+          - miner
+          - rust
+          - phoma
+          segmentation:
+            source_name: BRACOT
+            source_url: https://data.mendeley.com/datasets/pmkbyjpf6k/1
+            raw_dir: data/raw/segmentation/bracot
+            annotation_format: via
+            annotations_file: ''
+            manifest_file: ''
+            split_ratios:
+              train: 0.7
+              val: 0.15
+              test: 0.15
+          classification:
+            source_name: Coffee leaf diseases (Kaggle)
+            source_url: 
+              https://www.kaggle.com/datasets/badasstechie/coffee-leaf-diseases
+            raw_dir: data/raw/classification/coffee-leaf-diseases
+            train_labels_file: train_classes.csv
+            test_labels_file: test_classes.csv
+            mask_colors_file: mask_colors.csv
+            id_column: id
+            images_dir: images
+            masks_dir: masks
+            validation_fraction: 0.15
+          mask_background: true
+          mask_fill_rgb:
+          - 124
+          - 116
+          - 104
+          crop_padding_ratio: 0.05
+          min_crop_size: 32
+        seed: 42
+    outs:
+    - path: data/processed
+      hash: md5
+      md5: d19eb9a450c34bc20951d428bffd26a7.dir
+      size: 1463039563
+      nfiles: 3932
+    - path: metrics/data.json
+      hash: md5
+      md5: 63f257ef9a92346a1efe9f2f291cad91
+      size: 1193
