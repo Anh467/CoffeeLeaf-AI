@@ -15,7 +15,8 @@ stages:
     cmd: python pipeline.py prepare
     deps:
       - pipeline.py
-      - data/raw
+      - data/raw/segmentation
+      - data/raw/classification
     params:
       - seed
       - data
@@ -60,7 +61,11 @@ stages:
     params:
       - seed
       - classification
-      - data.classes
+      - data.disease_classes
+      - data.healthy_label
+      - data.mask_background
+      - data.mask_fill_rgb
+      - deployment.classifier_confidence
     outs:
       - models/classifiers
     metrics:
@@ -82,7 +87,8 @@ stages:
       - metrics/classifiers.json
       - data/processed/dataset_manifest.json
     params:
-      - data.classes
+      - data.disease_classes
+      - data.healthy_label
       - classification.candidates
       - selection
       - deployment
