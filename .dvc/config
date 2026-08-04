@@ -1,1 +1,4 @@
-
+[core]
+    remote = dagshub
+['remote "dagshub"']
+    url = https://dagshub.com/Anh467/CoffeeLeaf-AI.dvc
