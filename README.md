@@ -1,19 +1,22 @@
 # CoffeeLeaf-AI
 
 Pipeline MLOps phát hiện bệnh trên **ảnh chụp cả cây cà phê**. Hệ thống dùng hai
-model nối tiếp nhưng chỉ cần một bộ annotation:
+model nối tiếp và hai nguồn dữ liệu đúng với từng nhiệm vụ:
 
-1. YOLO instance segmentation tách từng lá khỏi ảnh toàn cây.
-2. EfficientNetV2-S hoặc RegNetY-3.2GF phân loại crop lá thành `healthy`,
-   `miner`, `phoma`, `rust`.
+1. [BRACOT](https://data.mendeley.com/datasets/pmkbyjpf6k/1) train YOLO instance
+   segmentation để tách từng lá khỏi ảnh cây.
+2. [Coffee leaf diseases trên Kaggle](https://www.kaggle.com/datasets/badasstechie/coffee-leaf-diseases/data)
+   train EfficientNetV2-S hoặc RegNetY-3.2GF với ba đầu ra độc lập `miner`,
+   `rust`, `phoma`; `healthy` được suy ra khi cả ba đều âm tính.
 3. DVC huấn luyện các ứng viên, lưu metrics, áp quality gate và đóng gói cặp
    model phù hợp nhất vào `deployment/`.
 4. MLflow trên DagsHub ghi lại experiment, đăng ký challenger và chỉ chuyển
    model tốt hơn sang `Production`/alias `champion`.
 
-Model segmentation được train class-agnostic (`leaf`). Nhãn bệnh trong polygon
-gốc chỉ được dùng để tạo crop classification, vì vậy inference không phụ thuộc
-vào nhãn bệnh do detector dự đoán.
+Model segmentation được train class-agnostic (`leaf`). Dữ liệu BRACOT không bị
+gán nhãn bệnh giả; nhãn bệnh chỉ đến từ `train_classes.csv` và
+`test_classes.csv` của dataset Kaggle. Đây là bài toán multi-label vì một lá có
+thể đồng thời mang `miner` và `rust`.
 
 ## Cấu trúc tối giản
 
@@ -23,7 +26,8 @@ notebooks/train_disease_classification.ipynb # training classifier
 pipeline.py       # prepare, select, publish, inference, doctor và model contract
 params.yaml       # dữ liệu, hyperparameters, quality gates
 dvc.yaml          # DAG: prepare -> hai notebook train -> select -> publish
-data/raw/         # dữ liệu gốc do DVC quản lý, không commit ảnh vào Git
+data/raw/segmentation/   # BRACOT + VIA JSON, do DVC quản lý
+data/raw/classification/ # Kaggle images + masks + CSV, do DVC quản lý
 metrics/          # JSON/CSV nhỏ để DVC so sánh thí nghiệm
 models/           # checkpoint ứng viên do DVC cache
 deployment/       # cặp model thắng + manifest/checksum do DVC cache
@@ -60,51 +64,85 @@ khác giá trị mặc định trong `params.yaml`, đặt `DAGSHUB_REPO_OWNER` 
 `DAGSHUB_REPO_NAME`. Credential chỉ nằm trong môi trường/cấu hình local; tuyệt
 đối không commit token hay `.dvc/config.local`.
 
-## 2. Dữ liệu và annotation
+## 2. Chuẩn bị hai dataset
 
-Ảnh phải mô phỏng đúng lúc triển khai: nhiều lá trên một cây, lá chồng lấp,
-nền vườn tự nhiên, nhiều khoảng cách, ánh sáng và thiết bị chụp khác nhau.
+### 2.1. Segmentation: BRACOT
 
-Mỗi lá nhìn thấy đủ rõ được gán một polygon theo định dạng YOLO segmentation:
+Tải `BRACOT-data.zip` từ Mendeley, giải nén toàn bộ vào:
 
 ```text
-<class_id> <x1> <y1> <x2> <y2> ... <xn> <yn>
+data/raw/segmentation/bracot/
 ```
 
-Tọa độ được chuẩn hóa về `[0, 1]`; class id theo thứ tự trong `params.yaml`:
+Không đổi tên ảnh hoặc JSON. Pipeline tìm tự động mọi JSON do VGG Image
+Annotator (VIA) tạo, ghép annotation với ảnh, chuẩn hóa polygon và sinh nhãn YOLO
+segmentation một lớp `leaf`.
 
-| ID | Lớp |
-|---:|---|
-| 0 | healthy |
-| 1 | miner |
-| 2 | phoma |
-| 3 | rust |
-
-Đặt ảnh/nhãn ở bất kỳ thư mục con nào dưới `data/raw`, rồi tạo
-`data/raw/manifest.csv`:
+Nếu không có manifest, BRACOT được chia ổn định theo seed thành 70% train, 15%
+validation và 15% test. Muốn kiểm soát split theo cây/phiên chụp, tạo file
+`data/raw/segmentation/bracot/manifest.csv`:
 
 ```csv
-image,label,split,group_id
-images/farm_a/tree_001_01.jpg,labels/farm_a/tree_001_01.txt,train,farm_a_tree_001
-images/farm_a/tree_071_01.jpg,labels/farm_a/tree_071_01.txt,val,farm_a_tree_071
-images/farm_b/tree_086_01.jpg,labels/farm_b/tree_086_01.txt,test,farm_b_tree_086
+image,split,group_id
+BRACOT-data/images/001.jpg,train,tree_001
+BRACOT-data/images/002.jpg,val,tree_002
+BRACOT-data/images/003.jpg,test,tree_003
 ```
 
-`group_id` nên đại diện cho cùng cây hoặc cùng phiên chụp. Pipeline sẽ dừng nếu
-một group xuất hiện ở nhiều split, tránh rò rỉ dữ liệu giữa train và test.
-`require_group_manifest: true` được bật mặc định; chỉ tắt cho thử nghiệm nhanh.
+Đường dẫn `image` phải tính từ thư mục `bracot`. Pipeline dừng nếu manifest thiếu
+ảnh VIA, chứa ảnh dư, hoặc cùng `group_id` xuất hiện ở nhiều split.
 
-Đưa dữ liệu lên DVC:
+### 2.2. Classification: Coffee leaf diseases trên Kaggle
+
+Tải và giải nén dataset vào:
+
+```text
+data/raw/classification/coffee-leaf-diseases/
+└── coffee-leaf-diseases/
+    ├── train/
+    │   ├── images/       # 1264 JPG
+    │   └── masks/        # 1264 PNG
+    ├── test/
+    │   ├── images/       # 400 JPG
+    │   └── masks/        # 400 PNG
+    ├── train_classes.csv
+    ├── test_classes.csv
+    └── mask_colors.csv
+```
+
+Có thể giữ nguyên thư mục trung gian do Kaggle tạo; pipeline tìm duy nhất ba CSV
+theo tên. CSV nhãn phải có schema `id,miner,rust,phoma`, và mỗi `id` phải có một
+ảnh cùng một mask. Pipeline giữ nguyên 400 mẫu test chính thức, rồi lấy 15% phần
+train làm validation bằng cách stratify theo toàn bộ tổ hợp nhãn. Mask màu được
+dùng để loại background trong notebook; không dùng mask như nhãn đầu ra của
+classifier.
+
+Classifier có ba sigmoid output và dùng `BCEWithLogitsLoss`, không phải softmax
+bốn lớp. Một mẫu `miner=1,rust=1,phoma=0` được giữ là hai bệnh đồng thời;
+`healthy` chỉ là trạng thái dẫn xuất khi cả ba nhãn bằng 0.
+
+### 2.3. Kiểm tra và quản lý bằng DVC
+
+Tại repository root:
 
 ```bash
-dvc add data/raw
-git add data/raw.dvc .gitignore
+python pipeline.py doctor --check-data
+dvc add data/raw/segmentation data/raw/classification
+git add data/raw/segmentation.dvc data/raw/classification.dvc .gitignore
 dvc push
 ```
 
-Dataset không được tự động tải từ Kaggle vì ảnh một lá/nền kiểm soát không đại
-diện đầy đủ cho ảnh toàn cây. Có thể trộn dataset ngoài vào train, nhưng test
-phải gồm ảnh thực địa độc lập tại điều kiện triển khai.
+`prepare` tạo hai đầu ra độc lập mà notebook đang dùng:
+
+```text
+data/processed/segmentation/     # YOLO images/labels + dataset.yaml
+data/processed/classification/   # image/mask theo split + labels.csv
+```
+
+Kaggle chỉ dùng để train classifier; BRACOT chỉ dùng để train segmenter. Khi
+inference, segmenter tách lá trên ảnh cây rồi classifier dự đoán bệnh cho từng
+crop. Để đánh giá triển khai nghiêm túc, nên bổ sung một test set ảnh thực địa
+riêng vì domain ảnh lá Kaggle có thể khác crop do segmenter tạo ra.
 
 ## 3. Huấn luyện và chọn model
 
@@ -120,8 +158,8 @@ dvc push
 
 Các stage:
 
-- `prepare`: kiểm tra polygon/split, tạo nhãn segmentation một lớp `leaf`, mask
-  nền ngoài polygon và sinh crop classification.
+- `prepare`: chuyển VIA polygon của BRACOT thành YOLO một lớp `leaf`; kiểm tra
+  cặp image/mask và CSV multi-label của Kaggle, giữ test gốc và sinh validation.
 - `train_segmenters`: Papermill thực thi `train_leaf_segmentation.ipynb`, mặc
   định so sánh `yolo11n-seg` và `yolo11s-seg` trên validation.
 - `train_classifiers`: Papermill thực thi
@@ -152,9 +190,9 @@ dvc exp show
 dvc metrics diff
 ```
 
-Thêm ảnh hoặc sửa annotation trong `data/raw`, đổi danh sách candidate hay
-hyperparameter trong `params.yaml`, rồi chạy lại `dvc repro`. DVC chỉ chạy lại
-những stage train bị ảnh hưởng; `publish` luôn kiểm tra lại trạng thái Registry
+Thêm ảnh hoặc sửa annotation trong một trong hai thư mục `data/raw`, đổi danh
+sách candidate hay hyperparameter trong `params.yaml`, rồi chạy lại `dvc repro`.
+DVC chỉ chạy lại những stage train bị ảnh hưởng; `publish` luôn kiểm tra lại trạng thái Registry
 và nhánh Git, nhưng nhận diện bundle theo SHA-256 nên không tạo model version
 trùng. Nhờ vậy candidate được train ở feature branch có thể được promote sau khi
 merge và chạy pipeline trên `main`.
@@ -252,9 +290,11 @@ nhờ vậy runtime luôn có thể lấy champion từ DagsHub Registry.
 
 Đầu ra gồm:
 
-- `runs/predict/annotated.jpg`: mask, box, lớp bệnh và confidence từng lá.
-- `runs/predict/result.json`: kết quả từng instance, số lượng mỗi bệnh và tỉ lệ
-  lá bệnh trong các dự đoán vượt ngưỡng.
+- `runs/predict/annotated.jpg`: mask, box, một hoặc nhiều bệnh và confidence của
+  từng lá.
+- `runs/predict/result.json`: `predicted_labels`, xác suất từng bệnh, số lượng
+  mỗi nhãn và tỉ lệ lá bệnh trong các dự đoán vượt ngưỡng. Vì đây là multi-label,
+  tổng `class_counts` có thể lớn hơn số lá nếu một lá mang nhiều bệnh.
 
 Tỉ lệ lá bệnh chỉ là chỉ báo thị giác, không thay thế đánh giá nông học. Với
 ảnh quá xa làm lá rất nhỏ, nên hướng dẫn người dùng tiến gần hơn hoặc chụp nhiều
@@ -271,7 +311,8 @@ python pipeline.py doctor --check-data
 dvc dag
 ```
 
-`doctor --check-data` xác minh file tồn tại, class id, polygon chuẩn hóa và group
-split trước khi sử dụng GPU. `doctor` chỉ báo token là `missing`, không in giá trị
+`doctor --check-data` xác minh VIA polygon của BRACOT; đồng thời kiểm tra schema
+CSV, cặp image/mask, kích thước ảnh, các nhãn dương/healthy và split của Kaggle
+trước khi sử dụng GPU. `doctor` chỉ báo token là `missing`, không in giá trị
 secret. Publish cần `DAGSHUB_USER_TOKEN`; nếu không có, stage sẽ dừng thay vì giả
 vờ đã triển khai.

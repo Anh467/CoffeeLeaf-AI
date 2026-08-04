@@ -1,10 +1,36 @@
 seed: 42
 data:
-  raw_dir: data/raw
   processed_dir: data/processed
   splits: [train, val, test]
-  classes: [healthy, miner, phoma, rust]
-  require_group_manifest: true
+  healthy_label: healthy
+  disease_classes: [miner, rust, phoma]
+  segmentation:
+    source_name: BRACOT
+    source_url: https://data.mendeley.com/datasets/pmkbyjpf6k/1
+    raw_dir: data/raw/segmentation/bracot
+    annotation_format: via
+    # Leave empty to auto-discover VIA JSON files anywhere below raw_dir.
+    annotations_file: ""
+    # Optional CSV with image,split,group_id. Without it, split is deterministic.
+    manifest_file: ""
+    split_ratios:
+      train: 0.70
+      val: 0.15
+      test: 0.15
+  classification:
+    source_name: Coffee leaf diseases (Kaggle)
+    source_url: https://www.kaggle.com/datasets/badasstechie/coffee-leaf-diseases
+    raw_dir: data/raw/classification/coffee-leaf-diseases
+    train_labels_file: train_classes.csv
+    test_labels_file: test_classes.csv
+    mask_colors_file: mask_colors.csv
+    id_column: id
+    images_dir: images
+    masks_dir: masks
+    # Kaggle supplies train/test. Keep test untouched and derive val from train,
+    # stratified by the complete multi-label signature.
+    validation_fraction: 0.15
+  # Shared by Kaggle mask preprocessing and segmenter crops at inference.
   mask_background: true
   mask_fill_rgb: [124, 116, 104]
   crop_padding_ratio: 0.05
@@ -40,7 +66,7 @@ classification:
   backbone_lr: 1.0e-05
   head_lr: 0.001
   weight_decay: 0.01
-  label_smoothing: 0.1
+  label_smoothing: 0.05
   patience: 6
 selection:
   # Stable, validation-only score used between runs for champion/challenger.

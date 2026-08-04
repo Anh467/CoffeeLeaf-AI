@@ -7,8 +7,8 @@ runs/
 mlruns/
 notebooks/*.executed.ipynb
 
-# DVC owns processed data and generated model bundles. `dvc add data/raw`
-# adds the raw dataset ignore rule only after it has created data/raw.dvc.
+# DVC owns processed data and generated model bundles. Track the two independent
+# raw sources with `dvc add data/raw/segmentation data/raw/classification`.
 data/processed/
 models/
 deployment/

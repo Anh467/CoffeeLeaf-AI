@@ -1,10 +1,11 @@
 """Reproducible two-stage coffee-leaf disease pipeline.
 
-The same YOLO-seg annotation is used twice: class ids describe disease states in
-raw data, while ``prepare`` produces a class-agnostic leaf segmentation dataset
-and masked leaf crops for classification. DVC executes the two training
-notebooks; this module owns preparation, model selection, registry publishing,
-inference and the shared classifier contract.
+Preparation intentionally consumes two independent datasets. BRACOT supplies
+VIA polygons for class-agnostic leaf instance segmentation, while the Kaggle
+Coffee Leaf Diseases dataset supplies leaf images, semantic masks and CSV
+multi-label targets. DVC executes the two training notebooks; this module owns
+data preparation, model selection, registry publishing, inference and the
+shared classifier contract.
 """
 
 from __future__ import annotations
@@ -37,17 +38,26 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 @dataclass(frozen=True)
-class Record:
+class Polygon:
+    class_id: int
+    points: tuple[tuple[float, float], ...]
+
+
+@dataclass(frozen=True)
+class SegmentationRecord:
     image: Path
-    label: Path
+    polygons: tuple[Polygon, ...]
     split: str
     group_id: str
 
 
 @dataclass(frozen=True)
-class Polygon:
-    class_id: int
-    points: tuple[tuple[float, float], ...]
+class ClassificationRecord:
+    image: Path
+    mask: Path
+    targets: tuple[int, ...]
+    split: str
+    group_id: str
 
 
 def project_path(value: str | Path) -> Path:
@@ -106,37 +116,11 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def dataset_fingerprint(records: Sequence[Record], raw_dir: Path) -> str:
-    """Hash dataset identity and bytes, independent of filesystem ordering."""
-    digest = hashlib.sha256()
-    ordered = sorted(
-        records,
-        key=lambda item: (
-            item.split,
-            item.group_id,
-            item.image.relative_to(raw_dir).as_posix(),
-        ),
-    )
-    for record in ordered:
-        identity = {
-            "group_id": record.group_id,
-            "image": record.image.relative_to(raw_dir).as_posix(),
-            "label": record.label.relative_to(raw_dir).as_posix(),
-            "split": record.split,
-        }
-        digest.update(
-            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
-        )
-        digest.update(bytes.fromhex(sha256_file(record.image)))
-        digest.update(bytes.fromhex(sha256_file(record.label)))
-    return digest.hexdigest()
-
-
-def record_asset_id(record: Record, raw_dir: Path) -> str:
+def record_asset_id(image: Path, raw_dir: Path) -> str:
     """Keep output names readable while preventing cross-folder collisions."""
-    relative = record.image.relative_to(raw_dir).as_posix()
+    relative = image.relative_to(raw_dir).as_posix()
     suffix = hashlib.sha256(relative.encode()).hexdigest()[:12]
-    return f"{record.image.stem}__{suffix}"
+    return f"{image.stem}__{suffix}"
 
 
 def seed_everything(seed: int) -> None:
@@ -162,65 +146,6 @@ def inside(path: Path, parent: Path) -> Path:
     return resolved
 
 
-def load_records(raw_dir: Path, splits: Sequence[str]) -> tuple[list[Record], bool]:
-    manifest = raw_dir / "manifest.csv"
-    records: list[Record] = []
-    used_manifest = manifest.exists()
-
-    if used_manifest:
-        with manifest.open("r", encoding="utf-8-sig", newline="") as stream:
-            reader = csv.DictReader(stream)
-            required = {"image", "label", "split", "group_id"}
-            missing = required.difference(reader.fieldnames or [])
-            if missing:
-                raise ValueError(f"manifest.csv is missing columns: {sorted(missing)}")
-            for row_number, row in enumerate(reader, start=2):
-                split = row["split"].strip().lower()
-                if split not in splits:
-                    raise ValueError(
-                        f"manifest.csv:{row_number}: invalid split {split!r}"
-                    )
-                group_id = row["group_id"].strip()
-                if not group_id:
-                    raise ValueError(f"manifest.csv:{row_number}: group_id is empty")
-                image = inside(raw_dir / row["image"].strip(), raw_dir)
-                label = inside(raw_dir / row["label"].strip(), raw_dir)
-                records.append(Record(image, label, split, group_id))
-    else:
-        for split in splits:
-            image_dir = raw_dir / "images" / split
-            label_dir = raw_dir / "labels" / split
-            if not image_dir.exists():
-                continue
-            for image in sorted(image_dir.iterdir()):
-                if image.is_file() and image.suffix.lower() in IMAGE_EXTENSIONS:
-                    label = label_dir / f"{image.stem}.txt"
-                    records.append(
-                        Record(image.resolve(), label.resolve(), split, image.stem)
-                    )
-
-    if not records:
-        raise ValueError(
-            "No annotated images found. Add data/raw/manifest.csv or use "
-            "data/raw/images/{train,val,test} with matching labels directories."
-        )
-
-    group_splits: dict[str, set[str]] = {}
-    for record in records:
-        if not record.image.exists():
-            raise FileNotFoundError(record.image)
-        if not record.label.exists():
-            raise FileNotFoundError(record.label)
-        group_splits.setdefault(record.group_id, set()).add(record.split)
-    leaking = {
-        group: values for group, values in group_splits.items() if len(values) > 1
-    }
-    if leaking:
-        preview = dict(list(leaking.items())[:5])
-        raise ValueError(f"Group leakage across splits detected: {preview}")
-    return records, used_manifest
-
-
 def polygon_area(points: Sequence[tuple[float, float]]) -> float:
     total = 0.0
     for index, (x1, y1) in enumerate(points):
@@ -229,101 +154,661 @@ def polygon_area(points: Sequence[tuple[float, float]]) -> float:
     return abs(total) / 2.0
 
 
-def read_polygons(path: Path, number_of_classes: int) -> list[Polygon]:
-    polygons: list[Polygon] = []
-    for line_number, raw_line in enumerate(
-        path.read_text(encoding="utf-8").splitlines(), start=1
-    ):
-        line = raw_line.strip()
-        if not line:
-            continue
-        parts = line.split()
-        if len(parts) < 7 or (len(parts) - 1) % 2:
-            raise ValueError(
-                f"{path}:{line_number}: YOLO polygon needs at least 3 points"
-            )
-        try:
-            class_value = float(parts[0])
-            class_id = int(class_value)
-            coordinates = [float(item) for item in parts[1:]]
-        except ValueError as error:
-            raise ValueError(f"{path}:{line_number}: non-numeric annotation") from error
-        if class_value != class_id or not 0 <= class_id < number_of_classes:
-            raise ValueError(f"{path}:{line_number}: invalid class id {parts[0]!r}")
-        if any(
-            not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in coordinates
-        ):
-            raise ValueError(
-                f"{path}:{line_number}: coordinates must be normalized to [0, 1]"
-            )
-        points = tuple(zip(coordinates[0::2], coordinates[1::2]))
-        if polygon_area(points) <= 1e-8:
-            raise ValueError(f"{path}:{line_number}: polygon area is zero")
-        polygons.append(Polygon(class_id, points))
-    if not polygons:
-        raise ValueError(f"Annotation contains no leaf polygons: {path}")
-    return polygons
+def normalize_token(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
 
 
-def pixel_polygon(polygon: Polygon, width: int, height: int) -> list[tuple[int, int]]:
-    return [
-        (
-            min(width - 1, max(0, round(x * width))),
-            min(height - 1, max(0, round(y * height))),
+def resolve_split_ratios(
+    settings: dict[str, Any], splits: Sequence[str]
+) -> dict[str, float]:
+    configured = settings.get("split_ratios", {})
+    if not isinstance(configured, dict) or set(configured) != set(splits):
+        raise ValueError(
+            "split_ratios must contain exactly these keys: " + ", ".join(splits)
         )
-        for x, y in polygon.points
+    ratios = {split: float(configured[split]) for split in splits}
+    if any(value <= 0.0 for value in ratios.values()) or not math.isclose(
+        sum(ratios.values()), 1.0, abs_tol=1e-6
+    ):
+        raise ValueError("split_ratios values must be positive and sum to 1.0")
+    return ratios
+
+
+def allocated_split_counts(
+    total: int, splits: Sequence[str], ratios: dict[str, float]
+) -> dict[str, int]:
+    if total < len(splits):
+        raise ValueError(
+            f"Need at least {len(splits)} items to create non-empty splits; got {total}"
+        )
+    counts = {split: 1 for split in splits}
+    remaining = total - len(splits)
+    quotas = {split: remaining * ratios[split] for split in splits}
+    for split in splits:
+        counts[split] += math.floor(quotas[split])
+    leftover = total - sum(counts.values())
+    ranked = sorted(
+        splits,
+        key=lambda split: (quotas[split] - math.floor(quotas[split]), split),
+        reverse=True,
+    )
+    for split in ranked[:leftover]:
+        counts[split] += 1
+    return counts
+
+
+def deterministic_split(
+    identities: Sequence[str],
+    splits: Sequence[str],
+    ratios: dict[str, float],
+    seed: int,
+    stratum: str,
+) -> dict[str, str]:
+    ordered = sorted(identities)
+    stratum_seed = int(hashlib.sha256(stratum.encode()).hexdigest()[:8], 16)
+    random.Random(seed + stratum_seed).shuffle(ordered)
+    counts = allocated_split_counts(len(ordered), splits, ratios)
+    assigned: dict[str, str] = {}
+    cursor = 0
+    for split in splits:
+        for identity in ordered[cursor : cursor + counts[split]]:
+            assigned[identity] = split
+        cursor += counts[split]
+    return assigned
+
+
+def via_entries(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [
+            item
+            for item in payload
+            if isinstance(item, dict) and "filename" in item and "regions" in item
+        ]
+    if not isinstance(payload, dict):
+        return []
+    metadata = payload.get("_via_img_metadata")
+    if isinstance(metadata, dict):
+        return [item for item in metadata.values() if isinstance(item, dict)]
+    return [
+        item
+        for item in payload.values()
+        if isinstance(item, dict) and "filename" in item and "regions" in item
     ]
 
 
-def masked_crop(
-    image: Image.Image,
-    polygon: Polygon,
-    padding_ratio: float,
-    mask_background: bool,
-    fill_rgb: tuple[int, int, int],
-) -> Image.Image:
-    width, height = image.size
-    points = pixel_polygon(polygon, width, height)
-    xs, ys = zip(*points)
-    x1, x2, y1, y2 = min(xs), max(xs), min(ys), max(ys)
-    pad_x = round((x2 - x1 + 1) * padding_ratio)
-    pad_y = round((y2 - y1 + 1) * padding_ratio)
-    box = (
-        max(0, x1 - pad_x),
-        max(0, y1 - pad_y),
-        min(width, x2 + pad_x + 1),
-        min(height, y2 + pad_y + 1),
+def load_via_documents(
+    raw_dir: Path, settings: dict[str, Any]
+) -> list[tuple[Path, list[dict[str, Any]]]]:
+    configured = settings.get("annotations_file", "")
+    if configured:
+        candidates = [inside(raw_dir / str(configured), raw_dir)]
+    else:
+        candidates = sorted(raw_dir.rglob("*.json"))
+    documents: list[tuple[Path, list[dict[str, Any]]]] = []
+    for path in candidates:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError) as error:
+            if configured:
+                raise ValueError(f"Cannot read VIA annotation {path}: {error}") from error
+            continue
+        entries = via_entries(payload)
+        if entries:
+            documents.append((path, entries))
+    if not documents:
+        location = str(configured) if configured else "a VIA JSON file"
+        raise ValueError(
+            f"No BRACOT VIA annotations found under {raw_dir}; expected {location}"
+        )
+    return documents
+
+
+def resolve_via_image(
+    filename: str,
+    annotation_path: Path,
+    raw_dir: Path,
+    images_by_name: dict[str, list[Path]],
+) -> Path:
+    normalized = filename.replace("\\", "/").strip()
+    relative = Path(normalized)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"Unsafe VIA image path {filename!r} in {annotation_path}")
+    for base in (annotation_path.parent, raw_dir):
+        candidate = inside(base / relative, raw_dir)
+        if candidate.is_file():
+            return candidate
+    matches = images_by_name.get(relative.name, [])
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise FileNotFoundError(
+            f"VIA annotation {annotation_path} references missing image {filename!r}"
+        )
+    raise ValueError(
+        f"VIA filename {filename!r} is ambiguous; use paths relative to {raw_dir}"
     )
-    crop = image.crop(box)
-    if not mask_background:
-        return crop
-    mask = Image.new("L", image.size, 0)
-    ImageDraw.Draw(mask).polygon(points, fill=255)
-    crop_mask = mask.crop(box)
-    background = Image.new("RGB", crop.size, fill_rgb)
-    return Image.composite(crop, background, crop_mask)
+
+
+def polygons_from_via_entry(
+    entry: dict[str, Any], image: Path, annotation_path: Path
+) -> tuple[Polygon, ...]:
+    regions = entry.get("regions", [])
+    if isinstance(regions, dict):
+        region_values = list(regions.values())
+    elif isinstance(regions, list):
+        region_values = regions
+    else:
+        raise ValueError(f"Invalid VIA regions for {image} in {annotation_path}")
+    with Image.open(image) as source:
+        width, height = source.size
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Invalid image dimensions: {image}")
+    polygons: list[Polygon] = []
+    for region_number, region in enumerate(region_values, start=1):
+        if not isinstance(region, dict):
+            continue
+        shape = region.get("shape_attributes", {})
+        if not isinstance(shape, dict):
+            continue
+        xs = shape.get("all_points_x")
+        ys = shape.get("all_points_y")
+        if not isinstance(xs, list) or not isinstance(ys, list):
+            continue
+        if len(xs) != len(ys) or len(xs) < 3:
+            raise ValueError(
+                f"{annotation_path}: region {region_number} for {image.name} "
+                "must contain at least three paired polygon points"
+            )
+        try:
+            points = tuple(
+                (
+                    min(1.0, max(0.0, float(x) / width)),
+                    min(1.0, max(0.0, float(y) / height)),
+                )
+                for x, y in zip(xs, ys)
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"{annotation_path}: non-numeric polygon for {image.name}"
+            ) from error
+        if any(not math.isfinite(value) for point in points for value in point):
+            raise ValueError(f"{annotation_path}: non-finite polygon for {image.name}")
+        if polygon_area(points) <= 1e-8:
+            raise ValueError(f"{annotation_path}: zero-area polygon for {image.name}")
+        polygons.append(Polygon(0, points))
+    if not polygons:
+        raise ValueError(f"VIA annotation contains no leaf polygons for {image}")
+    return tuple(polygons)
+
+
+def load_segmentation_manifest(
+    raw_dir: Path, settings: dict[str, Any], splits: Sequence[str]
+) -> tuple[dict[str, tuple[str, str]], bool]:
+    configured = str(settings.get("manifest_file", "")).strip()
+    manifest = (
+        inside(raw_dir / configured, raw_dir)
+        if configured
+        else raw_dir / "manifest.csv"
+    )
+    if not manifest.exists():
+        if configured:
+            raise FileNotFoundError(manifest)
+        return {}, False
+    assignments: dict[str, tuple[str, str]] = {}
+    with manifest.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        required = {"image", "split", "group_id"}
+        missing = required.difference(reader.fieldnames or [])
+        if missing:
+            raise ValueError(
+                f"{manifest} is missing columns: {sorted(missing)}"
+            )
+        for row_number, row in enumerate(reader, start=2):
+            identity = row["image"].strip().replace("\\", "/")
+            split = row["split"].strip().lower()
+            group_id = row["group_id"].strip()
+            if not identity or split not in splits or not group_id:
+                raise ValueError(
+                    f"{manifest}:{row_number}: image, valid split and group_id are required"
+                )
+            if identity in assignments:
+                raise ValueError(f"{manifest}:{row_number}: duplicate image {identity!r}")
+            assignments[identity] = (split, group_id)
+    return assignments, True
+
+
+def load_segmentation_records(
+    raw_dir: Path,
+    settings: dict[str, Any],
+    splits: Sequence[str],
+    seed: int,
+) -> tuple[list[SegmentationRecord], bool]:
+    if not raw_dir.is_dir():
+        raise FileNotFoundError(
+            f"BRACOT segmentation directory does not exist: {raw_dir}"
+        )
+    annotation_format = str(settings.get("annotation_format", "via")).lower()
+    if annotation_format not in {"via", "auto"}:
+        raise ValueError("data.segmentation.annotation_format must be 'via' or 'auto'")
+    image_paths = sorted(
+        path.resolve()
+        for path in raw_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+    )
+    images_by_name: dict[str, list[Path]] = {}
+    for image in image_paths:
+        images_by_name.setdefault(image.name, []).append(image)
+
+    annotated: dict[Path, tuple[Polygon, ...]] = {}
+    for annotation_path, entries in load_via_documents(raw_dir, settings):
+        for entry in entries:
+            filename = str(entry.get("filename", "")).strip()
+            if not filename:
+                raise ValueError(f"Missing VIA filename in {annotation_path}")
+            image = resolve_via_image(
+                filename, annotation_path, raw_dir, images_by_name
+            )
+            polygons = polygons_from_via_entry(
+                entry, image, annotation_path
+            )
+            if image in annotated and annotated[image] != polygons:
+                raise ValueError(f"Image has conflicting VIA annotations: {image}")
+            annotated[image] = polygons
+    if not annotated:
+        raise ValueError(f"No annotated BRACOT images found under {raw_dir}")
+
+    manifest, used_manifest = load_segmentation_manifest(raw_dir, settings, splits)
+    identities = {
+        image: image.relative_to(raw_dir).as_posix() for image in annotated
+    }
+    if used_manifest:
+        missing = sorted(set(identities.values()).difference(manifest))
+        extra = sorted(set(manifest).difference(identities.values()))
+        if missing or extra:
+            raise ValueError(
+                "Segmentation manifest does not match VIA images; "
+                f"missing={missing[:5]}, extra={extra[:5]}"
+            )
+        assignments = {identity: manifest[identity][0] for identity in manifest}
+        groups = {identity: manifest[identity][1] for identity in manifest}
+    else:
+        ratios = resolve_split_ratios(settings, splits)
+        assignments = deterministic_split(
+            list(identities.values()), splits, ratios, seed, "segmentation"
+        )
+        groups = {identity: identity for identity in identities.values()}
+
+    records = [
+        SegmentationRecord(
+            image=image,
+            polygons=annotated[image],
+            split=assignments[identity],
+            group_id=groups[identity],
+        )
+        for image, identity in identities.items()
+    ]
+    group_splits: dict[str, set[str]] = {}
+    for record in records:
+        group_splits.setdefault(record.group_id, set()).add(record.split)
+    leaking = {
+        group: values for group, values in group_splits.items() if len(values) > 1
+    }
+    if leaking:
+        raise ValueError(
+            f"Segmentation group leakage across splits: {dict(list(leaking.items())[:5])}"
+        )
+    missing_splits = [
+        split for split in splits if not any(r.split == split for r in records)
+    ]
+    if missing_splits:
+        raise ValueError(f"Segmentation data is missing splits: {missing_splits}")
+    return records, used_manifest
+
+
+def find_unique_dataset_file(raw_dir: Path, configured: Any, label: str) -> Path:
+    relative = Path(str(configured).strip())
+    if not relative.name or relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"Invalid {label} path: {configured!r}")
+    direct = inside(raw_dir / relative, raw_dir)
+    if direct.is_file():
+        return direct
+    matches = sorted(
+        path.resolve()
+        for path in raw_dir.rglob(relative.name)
+        if path.is_file()
+    )
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise FileNotFoundError(
+            f"Cannot find {label} {relative.as_posix()!r} under {raw_dir}"
+        )
+    raise ValueError(
+        f"Multiple {label} files named {relative.name!r} found under {raw_dir}: "
+        f"{[str(path) for path in matches[:5]]}"
+    )
+
+
+def index_assets_by_stem(directory: Path, kind: str) -> dict[str, Path]:
+    if not directory.is_dir():
+        raise FileNotFoundError(f"Missing Kaggle {kind} directory: {directory}")
+    assets: dict[str, Path] = {}
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        key = normalize_token(path.stem)
+        if not key:
+            raise ValueError(f"Invalid empty Kaggle sample id for {path}")
+        if key in assets:
+            raise ValueError(
+                f"Duplicate Kaggle {kind} stem {path.stem!r}: "
+                f"{assets[key]} and {path}"
+            )
+        assets[key] = path.resolve()
+    if not assets:
+        raise ValueError(f"No Kaggle {kind} files found under {directory}")
+    return assets
+
+
+def parse_binary_target(value: Any, path: Path, row_number: int, name: str) -> int:
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"{path}:{row_number}: target {name!r} must be 0 or 1"
+        ) from error
+    if parsed not in {0.0, 1.0}:
+        raise ValueError(f"{path}:{row_number}: target {name!r} must be 0 or 1")
+    return int(parsed)
+
+
+def load_mask_background_rgb(path: Path, disease_classes: Sequence[str]) -> tuple[int, int, int]:
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        headers = reader.fieldnames or []
+        by_token = {normalize_token(header): header for header in headers}
+        required_columns = {"channels", "background", "leaf", *disease_classes}
+        missing = [name for name in required_columns if normalize_token(name) not in by_token]
+        if missing:
+            raise ValueError(f"{path} is missing mask-color columns: {sorted(missing)}")
+        rows = list(reader)
+    channels: dict[str, int] = {}
+    channel_column = by_token["channels"]
+    background_column = by_token["background"]
+    for row_number, row in enumerate(rows, start=2):
+        channel = normalize_token(row.get(channel_column, ""))
+        if channel not in {"red", "green", "blue"}:
+            continue
+        try:
+            value = int(str(row.get(background_column, "")).strip())
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"{path}:{row_number}: invalid background color value"
+            ) from error
+        if not 0 <= value <= 255:
+            raise ValueError(f"{path}:{row_number}: background color must be 0..255")
+        channels[channel] = value
+    if set(channels) != {"red", "green", "blue"}:
+        raise ValueError(f"{path} must define red, green and blue mask channels")
+    return channels["red"], channels["green"], channels["blue"]
+
+
+def load_kaggle_label_rows(
+    path: Path,
+    dataset_root: Path,
+    source_split: str,
+    settings: dict[str, Any],
+    disease_classes: Sequence[str],
+) -> list[tuple[Path, Path, tuple[int, ...], str]]:
+    image_dir = dataset_root / source_split / str(settings.get("images_dir", "images"))
+    mask_dir = dataset_root / source_split / str(settings.get("masks_dir", "masks"))
+    images = index_assets_by_stem(image_dir, f"{source_split} images")
+    masks = index_assets_by_stem(mask_dir, f"{source_split} masks")
+    rows: list[tuple[Path, Path, tuple[int, ...], str]] = []
+    seen: set[str] = set()
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        headers = reader.fieldnames or []
+        by_token = {normalize_token(header): header for header in headers}
+        id_token = normalize_token(str(settings.get("id_column", "id")))
+        missing = [
+            name
+            for name in (id_token, *(normalize_token(name) for name in disease_classes))
+            if name not in by_token
+        ]
+        if missing:
+            raise ValueError(f"{path} is missing label columns: {sorted(missing)}")
+        for row_number, row in enumerate(reader, start=2):
+            raw_id = str(row.get(by_token[id_token], "")).strip()
+            sample_key = normalize_token(Path(raw_id).stem)
+            if not sample_key:
+                raise ValueError(f"{path}:{row_number}: sample id is empty")
+            if sample_key in seen:
+                raise ValueError(f"{path}:{row_number}: duplicate sample id {raw_id!r}")
+            seen.add(sample_key)
+            image = images.get(sample_key)
+            mask = masks.get(sample_key)
+            if image is None or mask is None:
+                raise FileNotFoundError(
+                    f"{path}:{row_number}: sample {raw_id!r} has no matching "
+                    f"image or mask in {source_split}/"
+                )
+            targets = tuple(
+                parse_binary_target(
+                    row.get(by_token[normalize_token(name)]), path, row_number, name
+                )
+                for name in disease_classes
+            )
+            rows.append((image, mask, targets, f"{source_split}:{sample_key}"))
+    unused_images = sorted(set(images).difference(seen))
+    unused_masks = sorted(set(masks).difference(seen))
+    if unused_images or unused_masks:
+        raise ValueError(
+            f"{path} does not cover every {source_split} asset; "
+            f"images={unused_images[:5]}, masks={unused_masks[:5]}"
+        )
+    return rows
+
+
+def load_classification_records(
+    raw_dir: Path,
+    settings: dict[str, Any],
+    disease_classes: Sequence[str],
+    splits: Sequence[str],
+    seed: int,
+) -> tuple[list[ClassificationRecord], tuple[int, int, int]]:
+    if not raw_dir.is_dir():
+        raise FileNotFoundError(
+            f"Kaggle classification directory does not exist: {raw_dir}"
+        )
+    if list(splits) != ["train", "val", "test"]:
+        raise ValueError("Kaggle loader requires splits [train, val, test]")
+    train_csv = find_unique_dataset_file(
+        raw_dir, settings.get("train_labels_file", "train_classes.csv"), "train labels"
+    )
+    test_csv = find_unique_dataset_file(
+        raw_dir, settings.get("test_labels_file", "test_classes.csv"), "test labels"
+    )
+    colors_csv = find_unique_dataset_file(
+        raw_dir, settings.get("mask_colors_file", "mask_colors.csv"), "mask colors"
+    )
+    if train_csv.parent != test_csv.parent or train_csv.parent != colors_csv.parent:
+        raise ValueError(
+            "Kaggle train_classes.csv, test_classes.csv and mask_colors.csv "
+            "must share one dataset directory"
+        )
+    dataset_root = train_csv.parent
+    background_rgb = load_mask_background_rgb(colors_csv, disease_classes)
+    train_rows = load_kaggle_label_rows(
+        train_csv, dataset_root, "train", settings, disease_classes
+    )
+    test_rows = load_kaggle_label_rows(
+        test_csv, dataset_root, "test", settings, disease_classes
+    )
+
+    validation_fraction = float(settings.get("validation_fraction", 0.15))
+    if not 0.0 < validation_fraction < 0.5:
+        raise ValueError("data.classification.validation_fraction must be between 0 and 0.5")
+    assignments: dict[str, str] = {}
+    by_signature: dict[str, list[str]] = {}
+    for _, _, targets, identity in train_rows:
+        signature = "".join(str(value) for value in targets)
+        by_signature.setdefault(signature, []).append(identity)
+    for signature, identities in by_signature.items():
+        if len(identities) == 1:
+            assignments[identities[0]] = "train"
+            continue
+        assignments.update(
+            deterministic_split(
+                identities,
+                ("train", "val"),
+                {"train": 1.0 - validation_fraction, "val": validation_fraction},
+                seed,
+                f"classification:{signature}",
+            )
+        )
+
+    records = [
+        ClassificationRecord(image, mask, targets, assignments[identity], identity)
+        for image, mask, targets, identity in train_rows
+    ]
+    records.extend(
+        ClassificationRecord(image, mask, targets, "test", identity)
+        for image, mask, targets, identity in test_rows
+    )
+    for record in records:
+        with Image.open(record.image) as image, Image.open(record.mask) as mask:
+            if image.size != mask.size:
+                raise ValueError(
+                    f"Kaggle image/mask dimensions differ for {record.group_id}: "
+                    f"{image.size} != {mask.size}"
+                )
+    missing_splits = [
+        split for split in splits if not any(record.split == split for record in records)
+    ]
+    missing_labels = [
+        f"{split}/{name}"
+        for split in splits
+        for index, name in enumerate(disease_classes)
+        if not any(record.split == split and record.targets[index] for record in records)
+    ]
+    missing_healthy = [
+        split
+        for split in splits
+        if not any(record.split == split and not any(record.targets) for record in records)
+    ]
+    if missing_splits or missing_labels or missing_healthy:
+        raise ValueError(
+            "Kaggle labels do not cover the required evaluation contract; "
+            f"missing_splits={missing_splits}, missing_labels={missing_labels}, "
+            f"missing_healthy={missing_healthy}"
+        )
+    return records, background_rgb
+
+
+def segmentation_fingerprint(
+    records: Sequence[SegmentationRecord], raw_dir: Path
+) -> str:
+    digest = hashlib.sha256()
+    for record in sorted(
+        records,
+        key=lambda item: (
+            item.split,
+            item.group_id,
+            item.image.relative_to(raw_dir).as_posix(),
+        ),
+    ):
+        payload = {
+            "group_id": record.group_id,
+            "image": record.image.relative_to(raw_dir).as_posix(),
+            "polygons": [polygon.points for polygon in record.polygons],
+            "split": record.split,
+        }
+        digest.update(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        )
+        digest.update(bytes.fromhex(sha256_file(record.image)))
+    return digest.hexdigest()
+
+
+def classification_fingerprint(
+    records: Sequence[ClassificationRecord], raw_dir: Path
+) -> str:
+    digest = hashlib.sha256()
+    for record in sorted(
+        records,
+        key=lambda item: (
+            item.split,
+            item.targets,
+            item.image.relative_to(raw_dir).as_posix(),
+        ),
+    ):
+        payload = {
+            "group_id": record.group_id,
+            "image": record.image.relative_to(raw_dir).as_posix(),
+            "mask": record.mask.relative_to(raw_dir).as_posix(),
+            "split": record.split,
+            "targets": record.targets,
+        }
+        digest.update(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        )
+        digest.update(bytes.fromhex(sha256_file(record.image)))
+        digest.update(bytes.fromhex(sha256_file(record.mask)))
+    return digest.hexdigest()
+
+
+def combined_fingerprint(*values: str) -> str:
+    return hashlib.sha256("\n".join(values).encode()).hexdigest()
 
 
 def prepare(config: dict[str, Any]) -> None:
     data = config["data"]
-    raw_dir = project_path(data["raw_dir"])
-    output_dir = reset_dir(project_path(data["processed_dir"]))
-    classes = list(data["classes"])
+    disease_classes = list(data["disease_classes"])
+    healthy_label = str(data["healthy_label"])
+    output_classes = [healthy_label, *disease_classes]
     splits = list(data["splits"])
-    records, used_manifest = load_records(raw_dir, splits)
-    if bool(data.get("require_group_manifest", False)) and not used_manifest:
-        raise ValueError(
-            "data.require_group_manifest=true but data/raw/manifest.csv is missing. "
-            "Use a group-aware manifest so the same tree/session cannot leak across splits."
-        )
-    seed_everything(int(config["seed"]))
-    full_fingerprint = dataset_fingerprint(records, raw_dir)
-    evaluation_records = [record for record in records if record.split == "val"]
-    evaluation_data_fingerprint = dataset_fingerprint(evaluation_records, raw_dir)
+    seed = int(config["seed"])
+    segmentation_settings = data["segmentation"]
+    classification_settings = data["classification"]
+    segmentation_raw = project_path(segmentation_settings["raw_dir"])
+    classification_raw = project_path(classification_settings["raw_dir"])
+
+    segmentation_records, used_segmentation_manifest = load_segmentation_records(
+        segmentation_raw, segmentation_settings, splits, seed
+    )
+    classification_records, mask_background_rgb = load_classification_records(
+        classification_raw, classification_settings, disease_classes, splits, seed
+    )
+    seed_everything(seed)
+
+    segmentation_full_fingerprint = segmentation_fingerprint(
+        segmentation_records, segmentation_raw
+    )
+    classification_full_fingerprint = classification_fingerprint(
+        classification_records, classification_raw
+    )
+    full_fingerprint = combined_fingerprint(
+        segmentation_full_fingerprint, classification_full_fingerprint
+    )
+    segmentation_validation_fingerprint = segmentation_fingerprint(
+        [record for record in segmentation_records if record.split == "val"],
+        segmentation_raw,
+    )
+    classification_validation_fingerprint = classification_fingerprint(
+        [record for record in classification_records if record.split == "val"],
+        classification_raw,
+    )
+    evaluation_data_fingerprint = combined_fingerprint(
+        segmentation_validation_fingerprint, classification_validation_fingerprint
+    )
     evaluation_protocol = {
-        "classes": classes,
+        "classification_mode": "multilabel",
+        "disease_classes": disease_classes,
+        "healthy_label": healthy_label,
         "crop_padding_ratio": float(data["crop_padding_ratio"]),
         "mask_background": bool(data["mask_background"]),
+        "mask_background_rgb": list(mask_background_rgb),
         "mask_fill_rgb": [int(value) for value in data["mask_fill_rgb"]],
         "min_crop_size": int(data["min_crop_size"]),
     }
@@ -334,17 +819,17 @@ def prepare(config: dict[str, Any]) -> None:
         ).encode()
     ).hexdigest()
 
+    output_dir = reset_dir(project_path(data["processed_dir"]))
     segment_root = output_dir / "segmentation"
     classifier_root = output_dir / "classification"
-    class_counts: Counter[tuple[str, str]] = Counter()
-    image_counts: Counter[str] = Counter()
-    skipped_small = 0
+    label_counts: Counter[tuple[str, str]] = Counter()
+    healthy_counts: Counter[str] = Counter()
+    multilabel_counts: Counter[str] = Counter()
+    segmentation_image_counts: Counter[str] = Counter()
+    segmentation_instance_counts: Counter[str] = Counter()
 
-    for record in records:
-        polygons = read_polygons(record.label, len(classes))
-        with Image.open(record.image) as source:
-            image = source.convert("RGB")
-        asset_id = record_asset_id(record, raw_dir)
+    for record in segmentation_records:
+        asset_id = record_asset_id(record.image, segmentation_raw)
         image_target = (
             segment_root
             / "images"
@@ -363,34 +848,60 @@ def prepare(config: dict[str, Any]) -> None:
                     for point in polygon.points
                     for coordinate in point
                 )
-                for polygon in polygons
+                for polygon in record.polygons
             )
             + "\n",
             encoding="utf-8",
         )
-        image_counts[record.split] += 1
+        segmentation_image_counts[record.split] += 1
+        segmentation_instance_counts[record.split] += len(record.polygons)
 
-        for leaf_number, polygon in enumerate(polygons):
-            crop = masked_crop(
-                image,
-                polygon,
-                float(data["crop_padding_ratio"]),
-                bool(data["mask_background"]),
-                tuple(int(value) for value in data["mask_fill_rgb"]),
-            )
-            if min(crop.size) < int(data["min_crop_size"]):
-                skipped_small += 1
-                continue
-            class_name = classes[polygon.class_id]
-            crop_target = (
-                classifier_root
-                / record.split
-                / class_name
-                / f"{asset_id}__leaf_{leaf_number:04d}.jpg"
-            )
-            crop_target.parent.mkdir(parents=True, exist_ok=True)
-            crop.save(crop_target, format="JPEG", quality=95, subsampling=0)
-            class_counts[(record.split, class_name)] += 1
+    classification_rows: list[dict[str, Any]] = []
+    for record in classification_records:
+        asset_id = record_asset_id(record.image, classification_raw)
+        image_target = (
+            classifier_root
+            / "images"
+            / record.split
+            / f"{asset_id}{record.image.suffix.lower()}"
+        )
+        mask_target = (
+            classifier_root
+            / "masks"
+            / record.split
+            / f"{asset_id}{record.mask.suffix.lower()}"
+        )
+        image_target.parent.mkdir(parents=True, exist_ok=True)
+        mask_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(record.image, image_target)
+        shutil.copy2(record.mask, mask_target)
+        is_healthy = not any(record.targets)
+        healthy_counts[record.split] += int(is_healthy)
+        multilabel_counts[record.split] += int(sum(record.targets) > 1)
+        row: dict[str, Any] = {
+            "image": image_target.relative_to(classifier_root).as_posix(),
+            "mask": mask_target.relative_to(classifier_root).as_posix(),
+            "split": record.split,
+            "group_id": record.group_id,
+            healthy_label: int(is_healthy),
+        }
+        for name, target in zip(disease_classes, record.targets):
+            row[name] = target
+            label_counts[(record.split, name)] += target
+        classification_rows.append(row)
+
+    write_csv(classifier_root / "labels.csv", classification_rows)
+    write_json(
+        classifier_root / "dataset.json",
+        {
+            "schema_version": 1,
+            "classification_mode": "multilabel",
+            "disease_classes": disease_classes,
+            "healthy_label": healthy_label,
+            "mask_background_rgb": list(mask_background_rgb),
+            "mask_fill_rgb": [int(value) for value in data["mask_fill_rgb"]],
+        },
+    )
 
     dataset_yaml = {
         "path": ".",
@@ -402,43 +913,85 @@ def prepare(config: dict[str, Any]) -> None:
     with (segment_root / "dataset.yaml").open("w", encoding="utf-8") as stream:
         yaml.safe_dump(dataset_yaml, stream, sort_keys=False, allow_unicode=True)
 
-    missing_splits = [split for split in splits if image_counts[split] == 0]
-    missing_classes = [
+    missing_splits = [
+        split for split in splits if segmentation_image_counts[split] == 0
+    ]
+    missing_labels = [
         f"{split}/{class_name}"
         for split in splits
-        for class_name in classes
-        if class_counts[(split, class_name)] == 0
+        for class_name in disease_classes
+        if label_counts[(split, class_name)] == 0
     ]
-    if missing_splits or missing_classes:
+    missing_healthy = [split for split in splits if healthy_counts[split] == 0]
+    if missing_splits or missing_labels or missing_healthy:
         raise ValueError(
             f"Incomplete prepared dataset; missing splits={missing_splits}, "
-            f"missing class folders={missing_classes}"
+            f"missing disease labels={missing_labels}, missing healthy={missing_healthy}"
         )
 
     metrics: dict[str, Any] = {
-        "images_total": sum(image_counts.values()),
-        "leaf_crops_total": sum(class_counts.values()),
-        "skipped_small_crops": skipped_small,
-        "used_group_manifest": int(used_manifest),
+        "segmentation_images_total": sum(segmentation_image_counts.values()),
+        "segmentation_instances_total": sum(segmentation_instance_counts.values()),
+        "classification_images_total": len(classification_records),
+        "used_segmentation_manifest": int(used_segmentation_manifest),
     }
     for split in splits:
-        metrics[f"images_{split}"] = image_counts[split]
-        metrics[f"leaf_crops_{split}"] = sum(
-            class_counts[(split, name)] for name in classes
+        metrics[f"segmentation_images_{split}"] = segmentation_image_counts[split]
+        metrics[f"segmentation_instances_{split}"] = segmentation_instance_counts[split]
+        metrics[f"classification_images_{split}"] = sum(
+            record.split == split for record in classification_records
         )
-        for name in classes:
-            metrics[f"leaf_crops_{split}_{name}"] = class_counts[(split, name)]
+        metrics[f"classification_images_{split}_{healthy_label}"] = healthy_counts[split]
+        metrics[f"classification_images_{split}_multi_disease"] = multilabel_counts[split]
+        for name in disease_classes:
+            metrics[f"classification_positive_{split}_{name}"] = label_counts[(split, name)]
     write_json(
         output_dir / "dataset_manifest.json",
         {
-            "classes": classes,
+            "schema_version": 3,
+            "classification_mode": "multilabel",
+            "classes": output_classes,
+            "disease_classes": disease_classes,
+            "healthy_label": healthy_label,
             "dataset_fingerprint": full_fingerprint,
             "evaluation_data_fingerprint": evaluation_data_fingerprint,
             "evaluation_fingerprint": evaluation_fingerprint,
             "evaluation_protocol": evaluation_protocol,
-            "records": len(records),
-            "splits": {split: image_counts[split] for split in splits},
-            "used_group_manifest": used_manifest,
+            "segmentation": {
+                "source_name": segmentation_settings.get("source_name", "BRACOT"),
+                "source_url": segmentation_settings.get("source_url", ""),
+                "fingerprint": segmentation_full_fingerprint,
+                "records": len(segmentation_records),
+                "instances": sum(len(record.polygons) for record in segmentation_records),
+                "splits": {
+                    split: segmentation_image_counts[split] for split in splits
+                },
+                "used_group_manifest": used_segmentation_manifest,
+            },
+            "classification": {
+                "source_name": classification_settings.get(
+                    "source_name", "Coffee Leaf Disease"
+                ),
+                "source_url": classification_settings.get("source_url", ""),
+                "fingerprint": classification_full_fingerprint,
+                "records": len(classification_records),
+                "splits": {
+                    split: sum(record.split == split for record in classification_records)
+                    for split in splits
+                },
+                "positive_counts": {
+                    split: {
+                        healthy_label: healthy_counts[split],
+                        **{
+                            name: label_counts[(split, name)]
+                            for name in disease_classes
+                        },
+                        "multi_disease": multilabel_counts[split],
+                    }
+                    for split in splits
+                },
+                "mask_background_rgb": list(mask_background_rgb),
+            },
         },
     )
     write_json(ROOT / "metrics" / "data.json", metrics)
@@ -601,7 +1154,7 @@ def export_onnx_models(
     )
     classifier, _ = build_classifier(
         checkpoint["model_name"],
-        len(checkpoint["classes"]),
+        len(checkpoint["disease_classes"]),
         float(checkpoint["dropout"]),
         int(checkpoint["unfreeze_blocks"]),
         False,
@@ -634,6 +1187,20 @@ def select_models(config: dict[str, Any]) -> None:
     classifier_report = json.loads(
         (ROOT / "metrics" / "classifiers.json").read_text(encoding="utf-8")
     )
+    expected_disease_classes = list(config["data"]["disease_classes"])
+    expected_healthy_label = str(config["data"]["healthy_label"])
+    if classifier_report.get("classification_mode") != "multilabel":
+        raise ValueError("Classifier metrics are not from a multi-label run")
+    if list(classifier_report.get("disease_classes", [])) != expected_disease_classes:
+        raise ValueError("Classifier metric class order differs from params.yaml")
+    if str(classifier_report.get("healthy_label")) != expected_healthy_label:
+        raise ValueError("Classifier metric healthy label differs from params.yaml")
+    if not math.isclose(
+        float(classifier_report.get("decision_threshold", -1.0)),
+        float(config["deployment"]["classifier_confidence"]),
+        abs_tol=1e-9,
+    ):
+        raise ValueError("Classifier metric threshold differs from params.yaml")
     segmenter_candidates = segmenter_report["candidates"]
     classifier_candidates = classifier_report["candidates"]
     dataset_manifest = json.loads(
@@ -662,12 +1229,17 @@ def select_models(config: dict[str, Any]) -> None:
         classifier_candidates[classifier_name],
         config["selection"]["deployment_weights"],
     )
+    disease_classes = list(config["data"]["disease_classes"])
+    healthy_label = str(config["data"]["healthy_label"])
     manifest: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "deploy_ready": segmenter_passed and classifier_passed,
         "deployment_score": stable_score,
         "dataset": dataset_manifest,
-        "classes": list(config["data"]["classes"]),
+        "classification_mode": "multilabel",
+        "classes": [healthy_label, *disease_classes],
+        "disease_classes": disease_classes,
+        "healthy_label": healthy_label,
         "preprocessing": {
             "mask_background": bool(config["data"]["mask_background"]),
             "mask_fill_rgb": list(config["data"]["mask_fill_rgb"]),
@@ -1130,6 +1702,39 @@ def publish(config: dict[str, Any]) -> None:
     )
 
 
+def decode_multilabel_prediction(
+    values: Sequence[float],
+    disease_classes: Sequence[str],
+    healthy_label: str,
+    threshold: float,
+) -> dict[str, Any]:
+    if len(values) != len(disease_classes):
+        raise ValueError("Classifier probability count does not match disease classes")
+    disease_probabilities = {
+        name: float(value) for name, value in zip(disease_classes, values)
+    }
+    selected = [
+        name for name in disease_classes if disease_probabilities[name] >= threshold
+    ]
+    healthy_probability = 1.0 - max(disease_probabilities.values(), default=0.0)
+    probabilities = {healthy_label: healthy_probability, **disease_probabilities}
+    if selected:
+        primary = max(selected, key=lambda name: disease_probabilities[name])
+        confidence = disease_probabilities[primary]
+        labels = selected
+    else:
+        primary = healthy_label
+        confidence = healthy_probability
+        labels = [healthy_label]
+    return {
+        "predicted_labels": labels,
+        "primary_label": primary,
+        "classification_confidence": confidence,
+        "accepted": confidence >= threshold,
+        "probabilities": probabilities,
+    }
+
+
 def predict(source: Path, output_dir: Path, bundle_dir: Path) -> None:
     try:
         import torch
@@ -1157,9 +1762,13 @@ def predict(source: Path, output_dir: Path, bundle_dir: Path) -> None:
     checkpoint = torch.load(
         deployment_dir / "leaf_classifier.pt", map_location=device, weights_only=False
     )
+    if checkpoint.get("classification_mode") != "multilabel":
+        raise RuntimeError("Classifier checkpoint is not a multi-label disease model")
+    disease_classes = list(checkpoint["disease_classes"])
+    healthy_label = str(checkpoint["healthy_label"])
     classifier, _ = build_classifier(
         checkpoint["model_name"],
-        len(checkpoint["classes"]),
+        len(disease_classes),
         float(checkpoint["dropout"]),
         int(checkpoint["unfreeze_blocks"]),
         False,
@@ -1233,23 +1842,26 @@ def predict(source: Path, output_dir: Path, bundle_dir: Path) -> None:
     if crop_tensors:
         batch = torch.stack(crop_tensors).to(device)
         with torch.inference_mode():
-            probabilities = classifier(batch).softmax(1).cpu()
+            probabilities = classifier(batch).sigmoid().cpu()
+        threshold = float(manifest["thresholds"]["classifier_confidence"])
         for leaf, probability in zip(leaves, probabilities):
-            confidence, class_id = probability.max(0)
-            confidence_value = float(confidence.item())
-            leaf["predicted_class"] = checkpoint["classes"][int(class_id.item())]
-            leaf["classification_confidence"] = confidence_value
-            leaf["accepted"] = confidence_value >= float(
-                manifest["thresholds"]["classifier_confidence"]
+            leaf.update(
+                decode_multilabel_prediction(
+                    probability.tolist(),
+                    disease_classes,
+                    healthy_label,
+                    threshold,
+                )
             )
-            leaf["probabilities"] = {
-                name: float(value)
-                for name, value in zip(checkpoint["classes"], probability.tolist())
-            }
 
     accepted = [leaf for leaf in leaves if leaf.get("accepted")]
-    counts = Counter(leaf["predicted_class"] for leaf in accepted)
-    diseased = sum(count for name, count in counts.items() if name != "healthy")
+    counts: Counter[str] = Counter()
+    for leaf in accepted:
+        counts.update(leaf["predicted_labels"])
+    diseased = sum(
+        any(name != healthy_label for name in leaf["predicted_labels"])
+        for leaf in accepted
+    )
     payload = {
         "source": str(source),
         "deploy_ready": bool(manifest["deploy_ready"]),
@@ -1273,19 +1885,17 @@ def predict(source: Path, output_dir: Path, bundle_dir: Path) -> None:
         (116, 78, 170, 75),
     ]
     for index, (leaf, mask) in enumerate(zip(leaves, masks)):
-        class_name = leaf.get("predicted_class", "unknown")
-        class_index = (
-            checkpoint["classes"].index(class_name)
-            if class_name in checkpoint["classes"]
-            else 0
-        )
+        class_name = leaf.get("primary_label", "unknown")
+        output_classes = [healthy_label, *disease_classes]
+        class_index = output_classes.index(class_name) if class_name in output_classes else 0
         color = colors[class_index % len(colors)]
         color_layer = Image.new("RGBA", image.size, color)
         overlay.alpha_composite(
             Image.composite(color_layer, Image.new("RGBA", image.size), mask)
         )
         box = leaf["bbox_xyxy"]
-        label = f"{class_name} {leaf.get('classification_confidence', 0.0):.2f}"
+        label_names = "+".join(leaf.get("predicted_labels", [class_name]))
+        label = f"{label_names} {leaf.get('classification_confidence', 0.0):.2f}"
         overlay_draw.rectangle(box, outline=color[:3] + (255,), width=3)
         overlay_draw.text(
             (box[0] + 3, max(0, box[1] - 13)), label, fill=color[:3] + (255,)
@@ -1298,9 +1908,46 @@ def predict(source: Path, output_dir: Path, bundle_dir: Path) -> None:
 
 def doctor(config: dict[str, Any], check_data: bool) -> None:
     errors: list[str] = []
-    classes = config.get("data", {}).get("classes", [])
-    if len(classes) < 2 or len(classes) != len(set(classes)):
-        errors.append("data.classes must contain at least two unique class names")
+    data_settings = config.get("data", {})
+    disease_classes = data_settings.get("disease_classes", [])
+    healthy_label = str(data_settings.get("healthy_label", "")).strip()
+    splits = data_settings.get("splits", [])
+    if len(disease_classes) < 1 or len(disease_classes) != len(set(disease_classes)):
+        errors.append("data.disease_classes must contain unique disease names")
+    if not healthy_label or healthy_label in disease_classes:
+        errors.append("data.healthy_label must be set and not overlap disease_classes")
+    if list(splits) != ["train", "val", "test"]:
+        errors.append("data.splits must be [train, val, test]")
+    for source in ("segmentation", "classification"):
+        source_settings = data_settings.get(source, {})
+        if not str(source_settings.get("raw_dir", "")).strip():
+            errors.append(f"data.{source}.raw_dir must not be empty")
+    try:
+        resolve_split_ratios(data_settings.get("segmentation", {}), splits)
+    except (TypeError, ValueError) as error:
+        errors.append(f"data.segmentation.{error}")
+    try:
+        validation_fraction = float(
+            data_settings.get("classification", {}).get("validation_fraction", 0.15)
+        )
+        if not 0.0 < validation_fraction < 0.5:
+            raise ValueError("validation_fraction must be between 0 and 0.5")
+    except (TypeError, ValueError) as error:
+        errors.append(f"data.classification.{error}")
+    try:
+        fill_rgb = [int(value) for value in data_settings.get("mask_fill_rgb", [])]
+        if len(fill_rgb) != 3 or any(value < 0 or value > 255 for value in fill_rgb):
+            raise ValueError("data.mask_fill_rgb must contain three values from 0 to 255")
+    except (TypeError, ValueError) as error:
+        errors.append(str(error))
+    try:
+        classifier_threshold = float(
+            config.get("deployment", {}).get("classifier_confidence", -1.0)
+        )
+        if not 0.0 < classifier_threshold < 1.0:
+            raise ValueError("deployment.classifier_confidence must be between 0 and 1")
+    except (TypeError, ValueError) as error:
+        errors.append(str(error))
     for kind in ("segmentation", "classification"):
         weights = config.get("selection", {}).get(kind, {}).get("weights", {})
         if not weights or not math.isclose(
@@ -1341,14 +1988,43 @@ def doctor(config: dict[str, Any], check_data: bool) -> None:
                 f"classification candidate {candidate!r} uses unsupported "
                 f"architecture {architecture!r}"
             )
-    if check_data:
+    data_summary: dict[str, Any] = {}
+    if check_data and not errors:
         try:
-            records, _ = load_records(
-                project_path(config["data"]["raw_dir"]), config["data"]["splits"]
+            segmentation_records, used_manifest = load_segmentation_records(
+                project_path(data_settings["segmentation"]["raw_dir"]),
+                data_settings["segmentation"],
+                splits,
+                int(config["seed"]),
             )
-            for record in records:
-                read_polygons(record.label, len(classes))
-        except (OSError, ValueError) as error:
+            classification_records, mask_background_rgb = load_classification_records(
+                project_path(data_settings["classification"]["raw_dir"]),
+                data_settings["classification"],
+                disease_classes,
+                splits,
+                int(config["seed"]),
+            )
+            positive_counts = {
+                name: sum(record.targets[index] for record in classification_records)
+                for index, name in enumerate(disease_classes)
+            }
+            data_summary = {
+                "segmentation_images": len(segmentation_records),
+                "segmentation_instances": sum(
+                    len(record.polygons) for record in segmentation_records
+                ),
+                "segmentation_manifest": used_manifest,
+                "classification_images": len(classification_records),
+                "classification_positive_labels": positive_counts,
+                "classification_healthy": sum(
+                    not any(record.targets) for record in classification_records
+                ),
+                "classification_multi_disease": sum(
+                    sum(record.targets) > 1 for record in classification_records
+                ),
+                "classification_mask_background_rgb": list(mask_background_rgb),
+            }
+        except (KeyError, OSError, TypeError, ValueError) as error:
             errors.append(str(error))
 
     packages = {}
@@ -1376,6 +2052,7 @@ def doctor(config: dict[str, Any], check_data: bool) -> None:
                 "dagshub_token": (
                     "configured" if os.getenv("DAGSHUB_USER_TOKEN") else "missing"
                 ),
+                "data": data_summary if check_data else "not checked",
                 "packages": packages,
             },
             indent=2,
