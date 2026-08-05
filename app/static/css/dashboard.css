@@ -71,6 +71,7 @@ body {
 }
 
 .viewer-frame {
+  position: relative;
   background: #111814;
   border-radius: 14px;
   overflow: hidden;
@@ -84,6 +85,44 @@ body {
   max-height: 640px;
   width: 100%;
   object-fit: contain;
+}
+
+.bbox-highlight {
+  position: absolute;
+  border: 3px solid #1e88e5;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.mode-select {
+  display: flex;
+  align-items: center;
+}
+
+.mode-select .form-select {
+  width: auto;
+  min-width: 210px;
+}
+
+.summary-note {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.swatch {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 2px;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+
+.prob-name {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
 }
 
 .summary-grid dt {

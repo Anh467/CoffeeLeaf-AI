@@ -71,7 +71,8 @@ async def health(service: InferenceDep) -> HealthResponse:
 async def predict(
     service: InferenceDep,
     image: UploadFile = File(...),
-    allow_single_leaf_fallback: bool = Form(default=True),
+    mode: str = Form(default="auto"),
+    allow_single_leaf_fallback: bool | None = Form(default=None),
 ) -> PredictResponse:
     if not image.filename:
         raise HTTPException(status_code=400, detail="Uploaded file must have a filename")
@@ -82,6 +83,7 @@ async def predict(
         result = service.predict_upload(
             image_bytes=content,
             filename=image.filename,
+            mode=mode,
             allow_single_leaf_fallback=allow_single_leaf_fallback,
         )
         return PredictResponse(**result)

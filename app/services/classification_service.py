@@ -15,9 +15,7 @@ LOGGER = logging.getLogger(__name__)
 
 def prepare_leaf_crops(
     image: Image.Image,
-    masks: list[Image.Image],
-    boxes: list[list[float]],
-    confidences: list[float],
+    instances: list[dict[str, Any]],
     bundle: InferenceBundle,
 ) -> dict[str, Any]:
     """Crop / mask-composite leaf instances and build tensors for classification."""
@@ -25,15 +23,23 @@ def prepare_leaf_crops(
     leaves: list[dict[str, Any]] = []
     crops: list[Image.Image] = []
     tensors: list[Any] = []
-    for index, (mask, box) in enumerate(zip(masks, boxes)):
+    masks: list[Image.Image] = []
+    for instance in instances:
+        mask = instance["mask"]
+        box = instance["bbox_xyxy"]
         crop, bbox = crop_leaf_instance(image, mask, box, bundle.manifest)
         crops.append(crop)
         tensors.append(bundle.transform(crop))
+        masks.append(mask)
         leaves.append(
             {
-                "leaf_id": index,
+                "leaf_id": int(instance["leaf_id"]),
                 "bbox_xyxy": bbox,
-                "detector_confidence": float(confidences[index]),
+                "detector_confidence": float(instance.get("detector_confidence", 0.0)),
+                "segmentation_confidence": float(
+                    instance.get("segmentation_confidence", instance.get("detector_confidence", 0.0))
+                ),
+                "mask_area": int(instance.get("mask_area", 0)),
             }
         )
     return {
@@ -41,6 +47,7 @@ def prepare_leaf_crops(
         "leaves": leaves,
         "crops": crops,
         "tensors": tensors,
+        "masks": masks,
     }
 
 
@@ -48,7 +55,7 @@ def prepare_single_leaf_crop(
     image: Image.Image,
     bundle: InferenceBundle,
 ) -> dict[str, Any]:
-    """Treat the whole RGB image as one leaf (close-up fallback)."""
+    """Treat the whole RGB image as one leaf (close-up / explicit single-leaf mode)."""
     started = time.perf_counter()
     width, height = image.size
     full_mask = Image.new("L", (width, height), 255)
@@ -60,6 +67,8 @@ def prepare_single_leaf_crop(
                 "leaf_id": 0,
                 "bbox_xyxy": [0, 0, width, height],
                 "detector_confidence": 1.0,
+                "segmentation_confidence": 1.0,
+                "mask_area": width * height,
             }
         ],
         "crops": [crop],

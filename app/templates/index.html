@@ -27,13 +27,22 @@
       </label>
       <div id="file-name" class="small text-secondary mt-3"></div>
     </div>
-    <div class="d-flex justify-content-end mt-3">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mt-3">
+      <label class="mode-select mb-0">
+        <span class="small text-secondary me-2">Detection mode</span>
+        <select id="predict-mode" class="form-select form-select-sm">
+          <option value="auto" selected>Auto detect leaves</option>
+          <option value="whole_image">Whole image segmentation</option>
+          <option value="single_leaf">Single leaf</option>
+        </select>
+      </label>
       <button id="predict-btn" class="btn btn-primary px-4" type="submit" disabled>Predict</button>
     </div>
   </form>
 </section>
 
 <section id="results" class="d-none">
+  <div id="result-message" class="alert alert-info d-none"></div>
   <div class="row g-4">
     <div class="col-lg-7">
       <div class="panel">
@@ -46,20 +55,28 @@
             <button type="button" class="btn btn-outline-secondary" data-view="boxes">Boxes</button>
           </div>
         </div>
-        <div class="viewer-frame">
+        <div class="viewer-frame" id="viewer-frame">
           <img id="main-image" alt="Prediction visualization" class="img-fluid">
+          <div id="bbox-highlight" class="bbox-highlight d-none"></div>
         </div>
       </div>
     </div>
     <div class="col-lg-5">
       <div class="panel mb-4">
         <h2 class="h5">Prediction Summary</h2>
-        <dl class="row mb-0 summary-grid">
+        <dl class="row mb-2 summary-grid">
+          <dt class="col-6">Total Leaves</dt><dd class="col-6" id="sum-total">—</dd>
           <dt class="col-6">Healthy Leaves</dt><dd class="col-6" id="sum-healthy">—</dd>
           <dt class="col-6">Diseased Leaves</dt><dd class="col-6" id="sum-diseased">—</dd>
-          <dt class="col-6">Detected Diseases</dt><dd class="col-6" id="sum-diseases">—</dd>
+          <dt class="col-6">Miner</dt><dd class="col-6" id="sum-miner">—</dd>
+          <dt class="col-6">Rust</dt><dd class="col-6" id="sum-rust">—</dd>
+          <dt class="col-6">Phoma</dt><dd class="col-6" id="sum-phoma">—</dd>
+          <dt class="col-6">Multi-disease Leaves</dt><dd class="col-6" id="sum-multi">—</dd>
           <dt class="col-6">Average Confidence</dt><dd class="col-6" id="sum-confidence">—</dd>
         </dl>
+        <p class="summary-note mb-0">
+          A leaf may contain multiple diseases, so disease totals can exceed diseased leaves.
+        </p>
       </div>
       <div class="panel mb-4">
         <h2 class="h5">Processing Information</h2>
@@ -67,6 +84,7 @@
           <dt class="col-6">Resolution</dt><dd class="col-6" id="info-resolution">—</dd>
           <dt class="col-6">File Size</dt><dd class="col-6" id="info-size">—</dd>
           <dt class="col-6">Mode</dt><dd class="col-6" id="info-mode">—</dd>
+          <dt class="col-6">Fallback</dt><dd class="col-6" id="info-fallback">—</dd>
           <dt class="col-6">Preprocessing</dt><dd class="col-6" id="info-preprocess">—</dd>
           <dt class="col-6">Segmentation</dt><dd class="col-6" id="info-segmentation">—</dd>
           <dt class="col-6">Classification</dt><dd class="col-6" id="info-classification">—</dd>

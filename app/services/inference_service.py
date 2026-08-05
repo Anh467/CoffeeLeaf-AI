@@ -9,19 +9,50 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from PIL import Image
 
 from app.database.sqlite import HistoryDatabase
 from app.services import classification_service, segmentation_service, visualization_service
-from app.services.statistics_service import build_summary
+from app.services.statistics_service import (
+    build_summary,
+    display_label_for_leaf,
+    is_healthy_leaf,
+)
 from pipeline import IMAGE_EXTENSIONS, ROOT, InferenceBundle, load_inference_bundle, write_json
 
 LOGGER = logging.getLogger(__name__)
 
 HISTORY_ROOT = ROOT / "runs" / "history"
 STATIC_MEDIA_PREFIX = "/media/history"
+PredictMode = Literal["auto", "whole_image", "single_leaf"]
+VALID_MODES = {"auto", "whole_image", "single_leaf"}
+
+
+def resolve_predict_mode(
+    mode: str | None = None,
+    *,
+    allow_single_leaf_fallback: bool | None = None,
+) -> PredictMode:
+    """Map request options to a canonical predict mode.
+
+    Legacy clients that only send ``allow_single_leaf_fallback`` keep working:
+    True -> auto, False -> whole_image.
+    """
+    if mode:
+        normalized = str(mode).strip().lower()
+        # Accept older "tree" alias used in previous responses.
+        if normalized == "tree":
+            return "whole_image"
+        if normalized not in VALID_MODES:
+            raise ValueError(
+                f"Unsupported mode '{mode}'. Allowed: auto, whole_image, single_leaf"
+            )
+        return normalized  # type: ignore[return-value]
+    if allow_single_leaf_fallback is False:
+        return "whole_image"
+    return "auto"
 
 
 class InferenceService:
@@ -92,7 +123,8 @@ class InferenceService:
         *,
         image_bytes: bytes,
         filename: str,
-        allow_single_leaf_fallback: bool = True,
+        mode: str | None = None,
+        allow_single_leaf_fallback: bool | None = None,
     ) -> dict[str, Any]:
         extension = Path(filename).suffix.lower()
         if extension not in IMAGE_EXTENSIONS:
@@ -100,6 +132,9 @@ class InferenceService:
                 f"Unsupported image type '{extension}'. "
                 f"Allowed: {', '.join(sorted(IMAGE_EXTENSIONS))}"
             )
+        predict_mode = resolve_predict_mode(
+            mode, allow_single_leaf_fallback=allow_single_leaf_fallback
+        )
 
         prediction_id = uuid.uuid4().hex
         run_dir = self.history_root / prediction_id
@@ -117,10 +152,11 @@ class InferenceService:
             payload = self._run_pipeline(
                 image=image,
                 bundle=bundle,
-                allow_single_leaf_fallback=allow_single_leaf_fallback,
+                mode=predict_mode,
             )
         total_ms = (time.perf_counter() - total_started) * 1000.0
 
+        viz_started = time.perf_counter()
         enriched_leaves = visualization_service.write_leaf_artifacts(
             run_dir,
             payload["leaves"],
@@ -143,18 +179,40 @@ class InferenceService:
             run_dir / "mask_overlay.jpg",
         )
         boxes_path = visualization_service.save_boxes_overlay(
-            image, payload["leaves"], run_dir / "boxes.jpg"
+            image,
+            payload["leaves"],
+            run_dir / "boxes.jpg",
+            healthy_label=payload["healthy_label"],
         )
         thumbnail_path = visualization_service.save_thumbnail(
             image, run_dir / "thumbnail.jpg"
         )
+        visualization_ms = (time.perf_counter() - viz_started) * 1000.0
 
-        summary = build_summary(payload["leaves"], payload["healthy_label"])
+        summary = build_summary(
+            payload["leaves"],
+            payload["healthy_label"],
+            disease_classes=payload["disease_classes"],
+            mode=payload["mode"],
+            fallback_to_single_leaf=payload["fallback_to_single_leaf"],
+        )
+        message = None
+        if summary["total_leaves"] == 0:
+            message = (
+                "No leaves detected. Try Auto mode for close-up fallback, "
+                "or upload a clearer whole-tree photo."
+            )
+
         processing = {
             "preprocess_time_ms": float(payload["timing"]["preprocess_ms"]),
             "segmentation_time_ms": float(payload["timing"]["segmentation_ms"]),
             "classification_time_ms": float(payload["timing"]["classification_ms"]),
+            "visualization_time_ms": float(visualization_ms),
             "total_time_ms": float(total_ms),
+            "mode": payload["mode"],
+            "fallback_to_single_leaf": bool(payload["fallback_to_single_leaf"]),
+            "segmenter": payload["segmenter"],
+            "classifier": payload["classifier"],
         }
         model_info = {
             "segmenter": payload["segmenter"],
@@ -182,16 +240,19 @@ class InferenceService:
             "model": model_info,
             "summary": summary,
             "leaves": [
-                self._serialize_leaf(leaf, prediction_id) for leaf in enriched_leaves
+                self._serialize_leaf(leaf, prediction_id, payload["healthy_label"])
+                for leaf in enriched_leaves
             ],
             "visualizations": {
                 "original": self._media_url(prediction_id, original_path.name),
                 "overlay": self._media_url(prediction_id, overlay_path.name),
                 "mask_overlay": self._media_url(prediction_id, mask_path.name),
+                "mask": self._media_url(prediction_id, mask_path.name),
                 "boxes": self._media_url(prediction_id, boxes_path.name),
                 "thumbnail": self._media_url(prediction_id, thumbnail_path.name),
             },
             "result_path": str(run_dir / "result.json"),
+            "message": message,
         }
         write_json(run_dir / "result.json", response)
         self.database.insert(
@@ -238,7 +299,7 @@ class InferenceService:
         payload = json.loads(result_path.read_text(encoding="utf-8"))
         payload["created_at"] = row["created_at"]
         payload["filename"] = row["filename"]
-        return payload
+        return self._normalize_legacy_payload(payload)
 
     def delete_history(self, prediction_id: str) -> bool:
         row = self.database.get(prediction_id)
@@ -255,42 +316,51 @@ class InferenceService:
         *,
         image: Image.Image,
         bundle: InferenceBundle,
-        allow_single_leaf_fallback: bool,
+        mode: PredictMode,
     ) -> dict[str, Any]:
-        segmentation = segmentation_service.segment_leaves(image, bundle)
-        masks = segmentation["masks"]
-        boxes = segmentation["boxes"]
-        confidences = segmentation["confidences"]
+        fallback = False
+        segmentation_ms = 0.0
 
-        if masks and boxes:
-            mode = "tree"
-            prepared = classification_service.prepare_leaf_crops(
-                image, masks, boxes, confidences, bundle
-            )
-            used_masks = masks
-        elif allow_single_leaf_fallback:
-            mode = "single_leaf"
+        if mode == "single_leaf":
             prepared = classification_service.prepare_single_leaf_crop(image, bundle)
             used_masks = prepared["masks"]
-            segmentation["elapsed_ms"] = 0.0
+            effective_mode: PredictMode = "single_leaf"
         else:
-            mode = "tree"
-            prepared = {
-                "elapsed_ms": 0.0,
-                "leaves": [],
-                "crops": [],
-                "tensors": [],
-            }
-            used_masks = []
+            segmentation = segmentation_service.segment_leaves(image, bundle)
+            segmentation_ms = float(segmentation["elapsed_ms"])
+            instances = segmentation["instances"]
+            if instances:
+                prepared = classification_service.prepare_leaf_crops(
+                    image, instances, bundle
+                )
+                used_masks = prepared["masks"]
+                effective_mode = "whole_image" if mode == "whole_image" else "auto"
+            elif mode == "auto":
+                fallback = True
+                prepared = classification_service.prepare_single_leaf_crop(image, bundle)
+                used_masks = prepared["masks"]
+                effective_mode = "single_leaf"
+            else:
+                # whole_image with zero detections: return empty result, no crash.
+                prepared = {
+                    "elapsed_ms": 0.0,
+                    "leaves": [],
+                    "crops": [],
+                    "tensors": [],
+                    "masks": [],
+                }
+                used_masks = []
+                effective_mode = "whole_image"
 
         classified = classification_service.classify_crops(
             prepared["tensors"], prepared["leaves"], bundle
         )
         return {
-            "mode": mode,
+            "mode": effective_mode,
+            "fallback_to_single_leaf": fallback,
             "timing": {
                 "preprocess_ms": float(prepared["elapsed_ms"]),
-                "segmentation_ms": float(segmentation["elapsed_ms"]),
+                "segmentation_ms": segmentation_ms,
                 "classification_ms": float(classified["elapsed_ms"]),
             },
             "leaves": classified["leaves"],
@@ -304,16 +374,30 @@ class InferenceService:
             "manifest": bundle.manifest,
         }
 
-    def _serialize_leaf(self, leaf: dict[str, Any], prediction_id: str) -> dict[str, Any]:
+    def _serialize_leaf(
+        self,
+        leaf: dict[str, Any],
+        prediction_id: str,
+        healthy_label: str,
+    ) -> dict[str, Any]:
         labels = list(leaf.get("predicted_labels", []))
+        display_label = display_label_for_leaf(leaf, healthy_label)
         prediction = "+".join(labels) if labels else "unknown"
         leaf_id = int(leaf["leaf_id"]) + 1
         relative_root = self.history_root / prediction_id
         mask_path = leaf.get("mask_path")
         crop_path = leaf.get("crop_path")
+        bbox_list = [int(value) for value in leaf["bbox_xyxy"]]
         return {
             "leaf_id": leaf_id,
-            "bbox": [int(value) for value in leaf["bbox_xyxy"]],
+            "bbox": {
+                "x1": bbox_list[0],
+                "y1": bbox_list[1],
+                "x2": bbox_list[2],
+                "y2": bbox_list[3],
+            },
+            # Legacy list form kept for older clients / history tooling.
+            "bbox_xyxy": bbox_list,
             "mask": (
                 self._media_url(
                     prediction_id,
@@ -330,16 +414,98 @@ class InferenceService:
                 if crop_path is not None
                 else None
             ),
+            "crop_path": (
+                self._media_url(
+                    prediction_id,
+                    Path(crop_path).relative_to(relative_root).as_posix(),
+                )
+                if crop_path is not None
+                else None
+            ),
             "prediction": prediction,
             "labels": labels,
+            "display_label": display_label,
+            "is_healthy": is_healthy_leaf(leaf, healthy_label),
             "confidence": float(leaf.get("classification_confidence", 0.0)),
+            "classification_confidence": float(leaf.get("classification_confidence", 0.0)),
             "detector_confidence": float(leaf.get("detector_confidence", 0.0)),
+            "segmentation_confidence": float(
+                leaf.get("segmentation_confidence", leaf.get("detector_confidence", 0.0))
+            ),
+            "mask_area": int(leaf.get("mask_area", 0)),
             "accepted": bool(leaf.get("accepted", False)),
             "probabilities": {
                 str(key): float(value)
                 for key, value in dict(leaf.get("probabilities", {})).items()
             },
         }
+
+    @staticmethod
+    def _normalize_legacy_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        """Upgrade older saved results so they validate against current schemas."""
+        summary = dict(payload.get("summary") or {})
+        if "disease_counts" not in summary:
+            class_counts = dict(summary.get("class_counts") or {})
+            summary["disease_counts"] = {
+                key: int(value)
+                for key, value in class_counts.items()
+                if key != "healthy"
+            }
+        summary.setdefault("multi_disease_leaves", 0)
+        payload["summary"] = summary
+
+        processing = dict(payload.get("processing") or {})
+        processing.setdefault("visualization_time_ms", 0.0)
+        processing.setdefault("mode", payload.get("image", {}).get("mode", "auto"))
+        processing.setdefault("fallback_to_single_leaf", False)
+        processing.setdefault("segmenter", (payload.get("model") or {}).get("segmenter"))
+        processing.setdefault("classifier", (payload.get("model") or {}).get("classifier"))
+        payload["processing"] = processing
+
+        visualizations = dict(payload.get("visualizations") or {})
+        if "mask" not in visualizations and "mask_overlay" in visualizations:
+            visualizations["mask"] = visualizations["mask_overlay"]
+        payload["visualizations"] = visualizations
+
+        leaves = []
+        for leaf in payload.get("leaves") or []:
+            item = dict(leaf)
+            bbox = item.get("bbox")
+            if isinstance(bbox, list) and len(bbox) == 4:
+                item["bbox"] = {
+                    "x1": int(bbox[0]),
+                    "y1": int(bbox[1]),
+                    "x2": int(bbox[2]),
+                    "y2": int(bbox[3]),
+                }
+                item.setdefault("bbox_xyxy", [int(v) for v in bbox])
+            elif isinstance(bbox, dict):
+                item.setdefault(
+                    "bbox_xyxy",
+                    [
+                        int(bbox.get("x1", 0)),
+                        int(bbox.get("y1", 0)),
+                        int(bbox.get("x2", 0)),
+                        int(bbox.get("y2", 0)),
+                    ],
+                )
+            labels = list(item.get("labels") or [])
+            item.setdefault("display_label", " + ".join(labels) if labels else "unknown")
+            item.setdefault("is_healthy", labels == ["healthy"] or labels == [])
+            item.setdefault(
+                "classification_confidence",
+                float(item.get("confidence", 0.0)),
+            )
+            item.setdefault(
+                "segmentation_confidence",
+                float(item.get("detector_confidence", 0.0)),
+            )
+            item.setdefault("mask_area", 0)
+            item.setdefault("crop_path", item.get("crop"))
+            leaves.append(item)
+        payload["leaves"] = leaves
+        payload.setdefault("message", None)
+        return payload
 
     @staticmethod
     def _media_url(prediction_id: str, relative: str) -> str:

@@ -2007,6 +2007,7 @@ def run_inference(
         source=np.asarray(rgb),
         conf=float(bundle.manifest["thresholds"]["detector_confidence"]),
         imgsz=int(bundle.manifest["segmenter"]["image_size"]),
+        retina_masks=True,
         verbose=False,
     )
     timing["segmentation_ms"] = (time.perf_counter() - started) * 1000.0
@@ -2030,10 +2031,65 @@ def run_inference(
             )
             masks.append(mask)
 
+    # Pair boxes/masks robustly; derive missing bboxes from masks.
+    count = max(len(masks), len(boxes))
+    paired_masks: list[Image.Image] = []
+    paired_boxes: list[list[float]] = []
+    paired_confidences: list[float] = []
+    for index in range(count):
+        mask = masks[index] if index < len(masks) else None
+        box = boxes[index] if index < len(boxes) else None
+        confidence = (
+            float(detector_confidences[index])
+            if index < len(detector_confidences)
+            else 0.0
+        )
+        if box is None and mask is not None:
+            array = np.asarray(mask)
+            ys, xs = np.where(array >= 128)
+            if len(xs) == 0:
+                continue
+            box = [
+                float(xs.min()),
+                float(ys.min()),
+                float(xs.max() + 1),
+                float(ys.max() + 1),
+            ]
+        if box is None:
+            continue
+        x1, y1, x2, y2 = [round(value) for value in box]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(width, x2), min(height, y2)
+        if x2 <= x1 or y2 <= y1:
+            continue
+        if mask is None:
+            mask = Image.new("L", (width, height), 0)
+            patch = Image.new("L", (x2 - x1, y2 - y1), 255)
+            mask.paste(patch, (x1, y1))
+        paired_masks.append(mask)
+        paired_boxes.append([x1, y1, x2, y2])
+        paired_confidences.append(confidence)
+
+    # Stable order: left-to-right, then top-to-bottom.
+    order = sorted(
+        range(len(paired_boxes)),
+        key=lambda index: (
+            paired_boxes[index][0],
+            paired_boxes[index][1],
+            paired_boxes[index][2],
+            paired_boxes[index][3],
+        ),
+    )
+    paired_masks = [paired_masks[index] for index in order]
+    paired_boxes = [paired_boxes[index] for index in order]
+    paired_confidences = [paired_confidences[index] for index in order]
+
     mode = "tree"
-    if masks and boxes:
+    fallback_to_single_leaf = False
+    if paired_masks and paired_boxes:
+        masks = paired_masks
         preprocess_started = time.perf_counter()
-        for index, (mask, box) in enumerate(zip(masks, boxes)):
+        for index, (mask, box) in enumerate(zip(paired_masks, paired_boxes)):
             crop, bbox = crop_leaf_instance(rgb, mask, box, bundle.manifest)
             crop_images.append(crop)
             crop_tensors.append(bundle.transform(crop))
@@ -2041,12 +2097,14 @@ def run_inference(
                 {
                     "leaf_id": index,
                     "bbox_xyxy": bbox,
-                    "detector_confidence": float(detector_confidences[index]),
+                    "detector_confidence": float(paired_confidences[index]),
+                    "segmentation_confidence": float(paired_confidences[index]),
                 }
             )
         timing["preprocess_ms"] = (time.perf_counter() - preprocess_started) * 1000.0
     elif allow_single_leaf_fallback:
         mode = "single_leaf"
+        fallback_to_single_leaf = True
         preprocess_started = time.perf_counter()
         full_mask = Image.new("L", (width, height), 255)
         masks = [full_mask]
@@ -2057,10 +2115,13 @@ def run_inference(
                 "leaf_id": 0,
                 "bbox_xyxy": [0, 0, width, height],
                 "detector_confidence": 1.0,
+                "segmentation_confidence": 1.0,
             }
         ]
         timing["preprocess_ms"] = (time.perf_counter() - preprocess_started) * 1000.0
-        timing["segmentation_ms"] = 0.0
+        # Keep measured segmentation time so callers can tell the detector ran.
+    else:
+        masks = []
 
     classify_started = time.perf_counter()
     decoded = classify_leaf_crops(bundle, crop_tensors)
@@ -2071,6 +2132,7 @@ def run_inference(
     summary = build_prediction_summary(leaves, bundle.healthy_label)
     return {
         "mode": mode,
+        "fallback_to_single_leaf": fallback_to_single_leaf,
         "image_size": {"width": width, "height": height},
         "deploy_ready": bool(bundle.manifest["deploy_ready"]),
         "timing": timing,
