@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="mb-4">
+  <div class="row g-3" id="top-cards">
+    <div class="col-6 col-lg-3"><div class="stat-card"><div class="stat-label">Total Leaves</div><div class="stat-value" id="stat-total">—</div></div></div>
+    <div class="col-6 col-lg-3"><div class="stat-card"><div class="stat-label">Diseased Leaves</div><div class="stat-value" id="stat-diseased">—</div></div></div>
+    <div class="col-6 col-lg-3"><div class="stat-card"><div class="stat-label">Average Confidence</div><div class="stat-value" id="stat-confidence">—</div></div></div>
+    <div class="col-6 col-lg-3"><div class="stat-card"><div class="stat-label">Total Time</div><div class="stat-value" id="stat-time">—</div></div></div>
+  </div>
+</section>
+
+{% if not health.models_loaded %}
+<div class="alert alert-warning">
+  Deployment bundle chưa sẵn sàng. Chạy <code>dvc pull deployment</code> rồi khởi động lại server.
+  {% if health.error %}<div class="small mt-1">{{ health.error }}</div>{% endif %}
+</div>
+{% endif %}
+
+<section class="upload-panel mb-4">
+  <form id="predict-form">
+    <div id="drop-zone" class="drop-zone">
+      <p class="mb-2 fw-semibold">Drag &amp; Drop ảnh cây hoặc ảnh một lá</p>
+      <p class="text-secondary small mb-3">hoặc chọn file từ máy</p>
+      <label class="btn btn-success">
+        Browse Image
+        <input id="image-input" type="file" accept="image/*" hidden>
+      </label>
+      <div id="file-name" class="small text-secondary mt-3"></div>
+    </div>
+    <div class="d-flex justify-content-end mt-3">
+      <button id="predict-btn" class="btn btn-primary px-4" type="submit" disabled>Predict</button>
+    </div>
+  </form>
+</section>
+
+<section id="results" class="d-none">
+  <div class="row g-4">
+    <div class="col-lg-7">
+      <div class="panel">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h2 class="h5 mb-0">Original / Overlay</h2>
+          <div class="btn-group btn-group-sm" role="group">
+            <button type="button" class="btn btn-outline-secondary active" data-view="overlay">Overlay</button>
+            <button type="button" class="btn btn-outline-secondary" data-view="original">Original</button>
+            <button type="button" class="btn btn-outline-secondary" data-view="mask_overlay">Mask</button>
+            <button type="button" class="btn btn-outline-secondary" data-view="boxes">Boxes</button>
+          </div>
+        </div>
+        <div class="viewer-frame">
+          <img id="main-image" alt="Prediction visualization" class="img-fluid">
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-5">
+      <div class="panel mb-4">
+        <h2 class="h5">Prediction Summary</h2>
+        <dl class="row mb-0 summary-grid">
+          <dt class="col-6">Healthy Leaves</dt><dd class="col-6" id="sum-healthy">—</dd>
+          <dt class="col-6">Diseased Leaves</dt><dd class="col-6" id="sum-diseased">—</dd>
+          <dt class="col-6">Detected Diseases</dt><dd class="col-6" id="sum-diseases">—</dd>
+          <dt class="col-6">Average Confidence</dt><dd class="col-6" id="sum-confidence">—</dd>
+        </dl>
+      </div>
+      <div class="panel mb-4">
+        <h2 class="h5">Processing Information</h2>
+        <dl class="row mb-0 summary-grid">
+          <dt class="col-6">Resolution</dt><dd class="col-6" id="info-resolution">—</dd>
+          <dt class="col-6">File Size</dt><dd class="col-6" id="info-size">—</dd>
+          <dt class="col-6">Mode</dt><dd class="col-6" id="info-mode">—</dd>
+          <dt class="col-6">Preprocessing</dt><dd class="col-6" id="info-preprocess">—</dd>
+          <dt class="col-6">Segmentation</dt><dd class="col-6" id="info-segmentation">—</dd>
+          <dt class="col-6">Classification</dt><dd class="col-6" id="info-classification">—</dd>
+          <dt class="col-6">Total Time</dt><dd class="col-6" id="info-total">—</dd>
+          <dt class="col-6">Segmenter</dt><dd class="col-6" id="info-segmenter">—</dd>
+          <dt class="col-6">Classifier</dt><dd class="col-6" id="info-classifier">—</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-4 mt-1">
+    <div class="col-lg-5">
+      <div class="panel">
+        <h2 class="h5">Leaf List</h2>
+        <div id="leaf-list" class="leaf-list"></div>
+      </div>
+    </div>
+    <div class="col-lg-7">
+      <div class="panel">
+        <h2 class="h5">Selected Leaf</h2>
+        <div id="leaf-detail" class="leaf-detail text-secondary">Chọn một lá ở danh sách bên trái.</div>
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/dashboard.js"></script>
+{% endblock %}

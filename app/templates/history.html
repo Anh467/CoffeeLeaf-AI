@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <h1 class="h3 mb-1">Prediction History</h1>
+    <p class="text-secondary mb-0">{{ history_total }} bản ghi đã lưu trong SQLite</p>
+  </div>
+  <a href="/" class="btn btn-outline-success">New prediction</a>
+</div>
+
+{% if history_items %}
+<div class="row g-3">
+  {% for item in history_items %}
+  <div class="col-md-6 col-xl-4">
+    <article class="panel history-card h-100">
+      {% if item.thumbnail %}
+      <img src="{{ item.thumbnail }}" alt="{{ item.filename }}" class="history-thumb mb-3">
+      {% endif %}
+      <div class="small text-secondary">{{ item.created_at }}</div>
+      <h2 class="h6 mt-1">{{ item.filename }}</h2>
+      <p class="mb-2">
+        {{ item.total_leaves }} leaves ·
+        {{ '%.0f'|format(item.processing_time_ms) }} ms ·
+        diseased {{ item.summary.diseased_leaves if item.summary.diseased_leaves is defined else 0 }}
+      </p>
+      <p class="small text-secondary mb-3">{{ item.model }}</p>
+      <div class="d-flex gap-2">
+        <a class="btn btn-sm btn-success" href="/?id={{ item.id }}">Open</a>
+        <button class="btn btn-sm btn-outline-danger" data-delete="{{ item.id }}">Delete</button>
+      </div>
+    </article>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="panel text-secondary">Chưa có lịch sử dự đoán.</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.querySelectorAll("[data-delete]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    const id = button.getAttribute("data-delete");
+    if (!id || !confirm("Xóa bản ghi này?")) return;
+    const response = await fetch(`/history/${id}`, { method: "DELETE" });
+    if (response.ok) window.location.reload();
+    else alert("Không xóa được bản ghi.");
+  });
+});
+</script>
+{% endblock %}
