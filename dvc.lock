@@ -15,8 +15,8 @@ stages:
       nfiles: 306
     - path: pipeline.py
       hash: md5
-      md5: 962418236b75d378506dc16fa21f55c4
-      size: 84573
+      md5: 2a434fef480f1d185a1993ad703bc4eb
+      size: 89476
     params:
       params.yaml:
         data:
@@ -130,12 +130,12 @@ stages:
       nfiles: 3330
     - path: notebooks/train_disease_classification.ipynb
       hash: md5
-      md5: eea66259b5914c579395cce5cfcd6332
-      size: 26159
+      md5: 5272dfa4079b2656925176fb03124bcd
+      size: 43910
     - path: pipeline.py
       hash: md5
-      md5: 962418236b75d378506dc16fa21f55c4
-      size: 84573
+      md5: 2a434fef480f1d185a1993ad703bc4eb
+      size: 89476
     params:
       params.yaml:
         classification:
@@ -150,6 +150,28 @@ stages:
               image_size: 224
               dropout: 0.3
               unfreeze_blocks: 1
+            convnext_tiny:
+              architecture: convnext_tiny
+              image_size: 224
+              dropout: 0.3
+              unfreeze_blocks: 2
+              batch_size: 4
+            densenet121:
+              architecture: densenet121
+              image_size: 224
+              dropout: 0.3
+              unfreeze_blocks: 2
+          augmentation:
+            crop_scale:
+            - 0.85
+            - 1.0
+            crop_ratio:
+            - 0.9
+            - 1.1
+            rotation_degrees: 20
+            color_jitter: 0.2
+            gaussian_blur_probability: 0.1
+            random_erasing_probability: 0.1
           epochs: 20
           batch_size: 8
           workers: 0
@@ -172,19 +194,39 @@ stages:
         deployment.classifier_confidence: 0.5
         seed: 42
     outs:
+    - path: metrics/classification_eda.json
+      hash: md5
+      md5: 14fda79ed005df36baad4470e1ccf231
+      size: 1332
+    - path: metrics/classification_eda.png
+      hash: md5
+      md5: c7e17cafcd6f9ed32ae9df5312ee54e2
+      size: 124911
+    - path: metrics/classifier_comparison.png
+      hash: md5
+      md5: c0bf81905407cd4c51cd15b9e3d17c2d
+      size: 149757
+    - path: metrics/classifier_confusion_matrices.png
+      hash: md5
+      md5: 31e3ffbc99a6572fde706a11c6403fca
+      size: 348990
+    - path: metrics/classifier_training_curves.png
+      hash: md5
+      md5: 53c0426893c8b85d19031af57563bf49
+      size: 406062
     - path: metrics/classifiers.csv
       hash: md5
-      md5: ddc3556a7b78efbaebd3176bee3ed3cb
-      size: 225
+      md5: 78b529926863c1d3a7262f347040b7e0
+      size: 1430
     - path: metrics/classifiers.json
       hash: md5
-      md5: 806b6193801ccc64b615d14fd071cda3
-      size: 5728
+      md5: e0bf7897820ca2aa541f00545a81bb88
+      size: 12649
     - path: models/classifiers
       hash: md5
-      md5: b84a9a5694bf7685a483cad5a8cc076a.dir
-      size: 153807838
-      nfiles: 6
+      md5: 7f5f845a4af1e4548afb68cc7614e4af.dir
+      size: 293613393
+      nfiles: 12
   select:
     cmd: python pipeline.py select
     deps:
@@ -282,10 +324,34 @@ stages:
       md5: 5ed64feebf98d8324daffc7ac0b10dbb.dir
       size: 78172830
       nfiles: 3
+    - path: metrics/classification_eda.json
+      hash: md5
+      md5: 14fda79ed005df36baad4470e1ccf231
+      size: 1332
+    - path: metrics/classification_eda.png
+      hash: md5
+      md5: c7e17cafcd6f9ed32ae9df5312ee54e2
+      size: 124911
+    - path: metrics/classifier_comparison.png
+      hash: md5
+      md5: c0bf81905407cd4c51cd15b9e3d17c2d
+      size: 149757
+    - path: metrics/classifier_confusion_matrices.png
+      hash: md5
+      md5: 31e3ffbc99a6572fde706a11c6403fca
+      size: 348990
+    - path: metrics/classifier_training_curves.png
+      hash: md5
+      md5: 53c0426893c8b85d19031af57563bf49
+      size: 406062
+    - path: metrics/classifiers.csv
+      hash: md5
+      md5: 78b529926863c1d3a7262f347040b7e0
+      size: 1430
     - path: metrics/classifiers.json
       hash: md5
-      md5: 806b6193801ccc64b615d14fd071cda3
-      size: 5728
+      md5: e0bf7897820ca2aa541f00545a81bb88
+      size: 12649
     - path: metrics/data.json
       hash: md5
       md5: 63f257ef9a92346a1efe9f2f291cad91
@@ -300,8 +366,8 @@ stages:
       size: 233
     - path: pipeline.py
       hash: md5
-      md5: 962418236b75d378506dc16fa21f55c4
-      size: 84573
+      md5: 2a434fef480f1d185a1993ad703bc4eb
+      size: 89476
     params:
       params.yaml:
         dagshub:
@@ -318,5 +384,5 @@ stages:
     outs:
     - path: metrics/publish.json
       hash: md5
-      md5: 369d24f3c7c9301dbbd4e323f4f10f91
-      size: 279
+      md5: 055d05508c8845b95f3d07d8041e6d4d
+      size: 307

@@ -1,0 +1,77 @@
+{
+  "classification_mode": "multilabel",
+  "combination_counts": {
+    "test": {
+      "healthy": 116,
+      "miner": 116,
+      "miner+rust": 12,
+      "phoma": 96,
+      "rust": 60
+    },
+    "train": {
+      "healthy": 241,
+      "miner": 241,
+      "miner+rust": 40,
+      "phoma": 329,
+      "rust": 220
+    },
+    "val": {
+      "healthy": 43,
+      "miner": 43,
+      "miner+rust": 8,
+      "phoma": 59,
+      "rust": 40
+    }
+  },
+  "label_counts": {
+    "test": {
+      "healthy": 116,
+      "miner": 128,
+      "phoma": 96,
+      "rust": 72
+    },
+    "train": {
+      "healthy": 241,
+      "miner": 281,
+      "phoma": 329,
+      "rust": 260
+    },
+    "val": {
+      "healthy": 43,
+      "miner": 51,
+      "phoma": 59,
+      "rust": 48
+    }
+  },
+  "split_counts": {
+    "test": 400,
+    "train": 1071,
+    "val": 193
+  },
+  "train_co_occurrence": {
+    "healthy": {
+      "healthy": 241,
+      "miner": 0,
+      "phoma": 0,
+      "rust": 0
+    },
+    "miner": {
+      "healthy": 0,
+      "miner": 281,
+      "phoma": 0,
+      "rust": 40
+    },
+    "phoma": {
+      "healthy": 0,
+      "miner": 0,
+      "phoma": 329,
+      "rust": 0
+    },
+    "rust": {
+      "healthy": 0,
+      "miner": 40,
+      "phoma": 0,
+      "rust": 260
+    }
+  }
+}

@@ -1,68 +1,73 @@
 {
   "candidates": {
-    "efficientnet_v2_s": {
-      "accuracy": 0.9896373056994818,
+    "convnext_tiny": {
+      "accuracy": 0.9533678756476683,
+      "batch_size": 4,
+      "best_epoch": 14,
       "decision_threshold": 0.5,
-      "disease_macro_f1": 0.9935897435897436,
-      "hamming_loss": 0.0034542314335060447,
-      "image_size": 300,
-      "latency_ms": 27.073419999942416,
-      "macro_f1": 0.9951923076923077,
-      "micro_f1": 0.995049504950495,
-      "min_class_recall": 1.0,
-      "size_mb": 77.85129833221436,
-      "test_accuracy": 0.9475,
-      "test_disease_macro_f1": 0.9681353529984941,
-      "test_hamming_loss": 0.0175,
-      "test_macro_f1": 0.9717155498365899,
-      "test_micro_f1": 0.9700598802395209,
-      "test_min_class_recall": 0.9655172413793104,
+      "disease_macro_f1": 0.9717759218753451,
+      "epochs_trained": 20,
+      "fps": 117.7246647701524,
+      "hamming_loss": 0.015544041450777202,
+      "image_size": 224,
+      "latency_ms": 8.494396666598428,
+      "macro_f1": 0.9788319414065089,
+      "micro_f1": 0.9778869778869779,
+      "min_class_recall": 0.9583333333333334,
+      "peak_vram_mb": 482.43701171875,
+      "size_mb": 106.19927501678467,
+      "test_accuracy": 0.905,
+      "test_disease_macro_f1": 0.9427938347953297,
+      "test_hamming_loss": 0.03166666666666667,
+      "test_macro_f1": 0.9506298588551181,
+      "test_micro_f1": 0.9476190476190476,
+      "test_min_class_recall": 0.9305555555555556,
       "test_per_class": {
         "healthy": {
           "confusion_matrix": [
             [
-              284,
-              0
+              281,
+              3
             ],
             [
-              4,
-              112
+              3,
+              113
             ]
           ],
-          "f1": 0.9824561403508771,
-          "precision": 1.0,
-          "recall": 0.9655172413793104,
+          "f1": 0.9741379310344828,
+          "precision": 0.9741379310344828,
+          "recall": 0.9741379310344828,
           "support": 116
         },
         "miner": {
           "confusion_matrix": [
             [
-              262,
-              10
+              255,
+              17
             ],
             [
-              1,
-              127
+              6,
+              122
             ]
           ],
-          "f1": 0.9584905660377359,
-          "precision": 0.927007299270073,
-          "recall": 0.9921875,
+          "f1": 0.9138576779026217,
+          "precision": 0.8776978417266187,
+          "recall": 0.953125,
           "support": 128
         },
         "phoma": {
           "confusion_matrix": [
             [
-              296,
-              8
+              294,
+              10
             ],
             [
               0,
               96
             ]
           ],
-          "f1": 0.96,
-          "precision": 0.9230769230769231,
+          "f1": 0.9504950495049505,
+          "precision": 0.9056603773584906,
           "recall": 1.0,
           "support": 96
         },
@@ -73,16 +78,19 @@
               0
             ],
             [
-              2,
-              70
+              5,
+              67
             ]
           ],
-          "f1": 0.9859154929577465,
+          "f1": 0.9640287769784173,
           "precision": 1.0,
-          "recall": 0.9722222222222222,
+          "recall": 0.9305555555555556,
           "support": 72
         }
       },
+      "total_params_m": 27.822435,
+      "trainable_params_m": 15.474435,
+      "training_seconds": 3746.7967905999976,
       "validation_per_class": {
         "healthy": {
           "f1": 1.0,
@@ -91,131 +99,375 @@
           "support": 43
         },
         "miner": {
-          "f1": 0.9807692307692307,
-          "precision": 0.9622641509433962,
+          "f1": 0.9532710280373832,
+          "precision": 0.9107142857142857,
           "recall": 1.0,
           "support": 51
         },
         "phoma": {
-          "f1": 1.0,
-          "precision": 1.0,
+          "f1": 0.9833333333333333,
+          "precision": 0.9672131147540983,
           "recall": 1.0,
           "support": 59
         },
         "rust": {
-          "f1": 1.0,
+          "f1": 0.9787234042553191,
           "precision": 1.0,
-          "recall": 1.0,
+          "recall": 0.9583333333333334,
           "support": 48
         }
       }
     },
-    "regnet_y_3_2gf": {
-      "accuracy": 0.8963730569948186,
+    "densenet121": {
+      "accuracy": 0.8497409326424871,
+      "batch_size": 8,
+      "best_epoch": 17,
       "decision_threshold": 0.5,
-      "disease_macro_f1": 0.9304435823916344,
-      "hamming_loss": 0.037996545768566495,
+      "disease_macro_f1": 0.8798692543411644,
+      "epochs_trained": 20,
+      "fps": 35.434232941480545,
+      "hamming_loss": 0.06044905008635579,
       "image_size": 224,
-      "latency_ms": 21.094163333327742,
-      "macro_f1": 0.9207242530587859,
-      "micro_f1": 0.9238329238329238,
-      "min_class_recall": 0.8604651162790697,
-      "size_mb": 68.8239278793335,
-      "test_accuracy": 0.885,
-      "test_disease_macro_f1": 0.91591679083667,
-      "test_hamming_loss": 0.0425,
-      "test_macro_f1": 0.9138098398235377,
-      "test_micro_f1": 0.9146919431279621,
-      "test_min_class_recall": 0.8879310344827587,
+      "latency_ms": 28.221296666743,
+      "macro_f1": 0.8710130518669844,
+      "micro_f1": 0.8784119106699751,
+      "min_class_recall": 0.6862745098039216,
+      "peak_vram_mb": 316.18359375,
+      "size_mb": 27.118779182434082,
+      "test_accuracy": 0.815,
+      "test_disease_macro_f1": 0.8655508360762462,
+      "test_hamming_loss": 0.06916666666666667,
+      "test_macro_f1": 0.8451090730031305,
+      "test_micro_f1": 0.8453364817001181,
+      "test_min_class_recall": 0.75,
       "test_per_class": {
         "healthy": {
           "confusion_matrix": [
             [
-              276,
-              8
+              265,
+              19
             ],
             [
-              13,
-              103
+              29,
+              87
             ]
           ],
-          "f1": 0.9074889867841409,
-          "precision": 0.9279279279279279,
-          "recall": 0.8879310344827587,
+          "f1": 0.7837837837837838,
+          "precision": 0.8207547169811321,
+          "recall": 0.75,
           "support": 116
         },
         "miner": {
           "confusion_matrix": [
             [
-              262,
-              10
+              267,
+              5
             ],
             [
-              13,
-              115
+              25,
+              103
             ]
           ],
-          "f1": 0.9090909090909091,
-          "precision": 0.92,
-          "recall": 0.8984375,
+          "f1": 0.8728813559322034,
+          "precision": 0.9537037037037037,
+          "recall": 0.8046875,
           "support": 128
         },
         "phoma": {
           "confusion_matrix": [
             [
-              295,
-              9
+              277,
+              27
             ],
             [
               0,
               96
             ]
           ],
-          "f1": 0.9552238805970149,
-          "precision": 0.9142857142857143,
+          "f1": 0.8767123287671232,
+          "precision": 0.7804878048780488,
           "recall": 1.0,
           "support": 96
         },
         "rust": {
           "confusion_matrix": [
             [
-              309,
-              19
+              302,
+              26
             ],
             [
               0,
               72
             ]
           ],
-          "f1": 0.8834355828220859,
-          "precision": 0.7912087912087912,
+          "f1": 0.8470588235294118,
+          "precision": 0.7346938775510204,
           "recall": 1.0,
           "support": 72
         }
       },
+      "total_params_m": 6.956931,
+      "trainable_params_m": 2.163203,
+      "training_seconds": 3568.1900000000023,
       "validation_per_class": {
         "healthy": {
-          "f1": 0.891566265060241,
-          "precision": 0.925,
-          "recall": 0.8604651162790697,
+          "f1": 0.8444444444444444,
+          "precision": 0.8085106382978723,
+          "recall": 0.8837209302325582,
           "support": 43
         },
         "miner": {
-          "f1": 0.9142857142857143,
-          "precision": 0.8888888888888888,
-          "recall": 0.9411764705882353,
+          "f1": 0.7865168539325843,
+          "precision": 0.9210526315789473,
+          "recall": 0.6862745098039216,
           "support": 51
         },
         "phoma": {
-          "f1": 0.9586776859504132,
-          "precision": 0.9354838709677419,
-          "recall": 0.9830508474576272,
+          "f1": 0.944,
+          "precision": 0.8939393939393939,
+          "recall": 1.0,
           "support": 59
         },
         "rust": {
-          "f1": 0.9183673469387755,
-          "precision": 0.9,
+          "f1": 0.9090909090909091,
+          "precision": 0.8823529411764706,
           "recall": 0.9375,
+          "support": 48
+        }
+      }
+    },
+    "efficientnet_v2_s": {
+      "accuracy": 0.9326424870466321,
+      "batch_size": 8,
+      "best_epoch": 15,
+      "decision_threshold": 0.5,
+      "disease_macro_f1": 0.9600505328361555,
+      "epochs_trained": 20,
+      "fps": 34.24136096165996,
+      "hamming_loss": 0.022452504317789293,
+      "image_size": 300,
+      "latency_ms": 29.20444666669937,
+      "macro_f1": 0.9640855186747356,
+      "micro_f1": 0.9631449631449631,
+      "min_class_recall": 0.9534883720930233,
+      "peak_vram_mb": 899.50146484375,
+      "size_mb": 77.85129833221436,
+      "test_accuracy": 0.88,
+      "test_disease_macro_f1": 0.9272432495233871,
+      "test_hamming_loss": 0.04,
+      "test_macro_f1": 0.9197315025631011,
+      "test_micro_f1": 0.9160671462829736,
+      "test_min_class_recall": 0.8275862068965517,
+      "test_per_class": {
+        "healthy": {
+          "confusion_matrix": [
+            [
+              282,
+              2
+            ],
+            [
+              20,
+              96
+            ]
+          ],
+          "f1": 0.897196261682243,
+          "precision": 0.9795918367346939,
+          "recall": 0.8275862068965517,
+          "support": 116
+        },
+        "miner": {
+          "confusion_matrix": [
+            [
+              267,
+              5
+            ],
+            [
+              7,
+              121
+            ]
+          ],
+          "f1": 0.952755905511811,
+          "precision": 0.9603174603174603,
+          "recall": 0.9453125,
+          "support": 128
+        },
+        "phoma": {
+          "confusion_matrix": [
+            [
+              272,
+              32
+            ],
+            [
+              0,
+              96
+            ]
+          ],
+          "f1": 0.8571428571428571,
+          "precision": 0.75,
+          "recall": 1.0,
+          "support": 96
+        },
+        "rust": {
+          "confusion_matrix": [
+            [
+              327,
+              1
+            ],
+            [
+              3,
+              69
+            ]
+          ],
+          "f1": 0.971830985915493,
+          "precision": 0.9857142857142858,
+          "recall": 0.9583333333333334,
+          "support": 72
+        }
+      },
+      "total_params_m": 20.181331,
+      "trainable_params_m": 18.359755,
+      "training_seconds": 3934.4461037,
+      "validation_per_class": {
+        "healthy": {
+          "f1": 0.9761904761904762,
+          "precision": 1.0,
+          "recall": 0.9534883720930233,
+          "support": 43
+        },
+        "miner": {
+          "f1": 0.9523809523809523,
+          "precision": 0.9259259259259259,
+          "recall": 0.9803921568627451,
+          "support": 51
+        },
+        "phoma": {
+          "f1": 0.959349593495935,
+          "precision": 0.921875,
+          "recall": 1.0,
+          "support": 59
+        },
+        "rust": {
+          "f1": 0.968421052631579,
+          "precision": 0.9787234042553191,
+          "recall": 0.9583333333333334,
+          "support": 48
+        }
+      }
+    },
+    "regnet_y_3_2gf": {
+      "accuracy": 0.8290155440414507,
+      "batch_size": 8,
+      "best_epoch": 13,
+      "decision_threshold": 0.5,
+      "disease_macro_f1": 0.8852862823451059,
+      "epochs_trained": 19,
+      "fps": 44.461036644743864,
+      "hamming_loss": 0.06563039723661486,
+      "image_size": 224,
+      "latency_ms": 22.49160333327988,
+      "macro_f1": 0.8834769068807806,
+      "micro_f1": 0.8823529411764706,
+      "min_class_recall": 0.8333333333333334,
+      "peak_vram_mb": 361.69580078125,
+      "size_mb": 68.8239278793335,
+      "test_accuracy": 0.815,
+      "test_disease_macro_f1": 0.8846069614422601,
+      "test_hamming_loss": 0.06666666666666667,
+      "test_macro_f1": 0.8643684630908275,
+      "test_micro_f1": 0.8540925266903915,
+      "test_min_class_recall": 0.7586206896551724,
+      "test_per_class": {
+        "healthy": {
+          "confusion_matrix": [
+            [
+              269,
+              15
+            ],
+            [
+              28,
+              88
+            ]
+          ],
+          "f1": 0.8036529680365296,
+          "precision": 0.8543689320388349,
+          "recall": 0.7586206896551724,
+          "support": 116
+        },
+        "miner": {
+          "confusion_matrix": [
+            [
+              268,
+              4
+            ],
+            [
+              21,
+              107
+            ]
+          ],
+          "f1": 0.895397489539749,
+          "precision": 0.963963963963964,
+          "recall": 0.8359375,
+          "support": 128
+        },
+        "phoma": {
+          "confusion_matrix": [
+            [
+              254,
+              50
+            ],
+            [
+              0,
+              96
+            ]
+          ],
+          "f1": 0.7933884297520661,
+          "precision": 0.6575342465753424,
+          "recall": 1.0,
+          "support": 96
+        },
+        "rust": {
+          "confusion_matrix": [
+            [
+              326,
+              2
+            ],
+            [
+              3,
+              69
+            ]
+          ],
+          "f1": 0.965034965034965,
+          "precision": 0.971830985915493,
+          "recall": 0.9583333333333334,
+          "support": 72
+        }
+      },
+      "total_params_m": 17.927877,
+      "trainable_params_m": 4.808307,
+      "training_seconds": 3372.2935660000003,
+      "validation_per_class": {
+        "healthy": {
+          "f1": 0.8780487804878049,
+          "precision": 0.9230769230769231,
+          "recall": 0.8372093023255814,
+          "support": 43
+        },
+        "miner": {
+          "f1": 0.9090909090909091,
+          "precision": 0.9375,
+          "recall": 0.8823529411764706,
+          "support": 51
+        },
+        "phoma": {
+          "f1": 0.8676470588235294,
+          "precision": 0.7662337662337663,
+          "recall": 1.0,
+          "support": 59
+        },
+        "rust": {
+          "f1": 0.8791208791208791,
+          "precision": 0.9302325581395349,
+          "recall": 0.8333333333333334,
           "support": 48
         }
       }
