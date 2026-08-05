@@ -69,6 +69,30 @@ classification:
       image_size: 224
       dropout: 0.3
       unfreeze_blocks: 1
+    convnext_tiny:
+      architecture: convnext_tiny
+      image_size: 224
+      dropout: 0.3
+      unfreeze_blocks: 2
+      # ConvNeXt uses more VRAM; keep this safe for a 6 GB RTX 3060 Laptop GPU.
+      batch_size: 4
+    densenet121:
+      architecture: densenet121
+      image_size: 224
+      dropout: 0.3
+      unfreeze_blocks: 2
+  augmentation:
+    # Mild robustness noise: preserve small lesions instead of obscuring them.
+    crop_scale:
+    - 0.85
+    - 1.0
+    crop_ratio:
+    - 0.9
+    - 1.1
+    rotation_degrees: 20
+    color_jitter: 0.2
+    gaussian_blur_probability: 0.1
+    random_erasing_probability: 0.1
   epochs: 20
   batch_size: 8
   workers: 0
