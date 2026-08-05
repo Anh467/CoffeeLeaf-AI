@@ -168,6 +168,7 @@ def segment_leaves(
             masks.append(mask)
 
     min_size = min_crop_size_from_manifest(bundle.manifest)
+    raw_instances = max(len(boxes), len(masks))
     instances = build_leaf_instances(
         boxes=boxes,
         confidences=confidences,
@@ -176,9 +177,16 @@ def segment_leaves(
         height=height,
         min_crop_size=min_size,
     )
-    LOGGER.debug("Segmented %s leaves in %.1f ms", len(instances), elapsed_ms)
+    LOGGER.debug(
+        "Segmented raw=%s valid=%s in %.1f ms",
+        raw_instances,
+        len(instances),
+        elapsed_ms,
+    )
     return {
         "elapsed_ms": elapsed_ms,
+        "raw_instances": raw_instances,
+        "valid_instances": len(instances),
         "instances": instances,
         "boxes": [item["bbox_xyxy"] for item in instances],
         "confidences": [item["segmentation_confidence"] for item in instances],

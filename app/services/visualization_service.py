@@ -81,13 +81,25 @@ def _draw_label_box(
     drawer.text((label_x + pad, label_y + pad), text, fill=(255, 255, 255), font=font)
 
 
+def save_plain_image(image: Image.Image, output_path: Path, quality: int = 92) -> Path:
+    """Save the RGB image without adding model overlays."""
+    canvas = image.convert("RGB")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(output_path, quality=quality)
+    return output_path
+
+
 def save_mask_overlay(
     image: Image.Image,
     leaves: Sequence[dict],
     masks: Sequence[Image.Image],
     healthy_label: str,
     output_path: Path,
+    *,
+    draw_annotations: bool = True,
 ) -> Path:
+    if not draw_annotations or not leaves or not masks:
+        return save_plain_image(image, output_path)
     base = image.convert("RGBA")
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     for leaf, mask in zip(leaves, masks):
@@ -107,7 +119,11 @@ def save_boxes_overlay(
     leaves: Sequence[dict],
     output_path: Path,
     healthy_label: str = "healthy",
+    *,
+    draw_annotations: bool = True,
 ) -> Path:
+    if not draw_annotations or not leaves:
+        return save_plain_image(image, output_path)
     canvas = image.convert("RGB").copy()
     drawer = ImageDraw.Draw(canvas)
     font = _load_font(15)
@@ -131,8 +147,12 @@ def save_prediction_overlay(
     healthy_label: str,
     disease_classes: Sequence[str],
     output_path: Path,
+    *,
+    draw_annotations: bool = True,
 ) -> Path:
     del disease_classes  # color mapping is status-based via LABEL_COLORS
+    if not draw_annotations or not leaves:
+        return save_plain_image(image, output_path)
     base = image.convert("RGBA")
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     for leaf, mask in zip(leaves, masks):

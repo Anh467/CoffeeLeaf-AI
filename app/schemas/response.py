@@ -29,7 +29,11 @@ class ProcessingInfo(BaseModel):
     total_time_ms: float
     visualization_time_ms: float = 0.0
     mode: str | None = None
+    requested_mode: str | None = None
+    resolved_mode: str | None = None
     fallback_to_single_leaf: bool = False
+    raw_instances: int = 0
+    valid_instances: int = 0
     segmenter: str | None = None
     classifier: str | None = None
 

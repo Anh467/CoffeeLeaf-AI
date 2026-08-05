@@ -48,13 +48,14 @@
       <div class="panel">
         <div class="d-flex justify-content-between align-items-center mb-3">
           <h2 class="h5 mb-0">Original / Overlay</h2>
-          <div class="btn-group btn-group-sm" role="group">
-            <button type="button" class="btn btn-outline-secondary active" data-view="overlay">Overlay</button>
+          <div class="btn-group btn-group-sm" role="group" id="view-tabs">
             <button type="button" class="btn btn-outline-secondary" data-view="original">Original</button>
-            <button type="button" class="btn btn-outline-secondary" data-view="mask_overlay">Mask</button>
-            <button type="button" class="btn btn-outline-secondary" data-view="boxes">Boxes</button>
+            <button type="button" class="btn btn-outline-secondary active" data-view="overlay">Overlay</button>
+            <button type="button" class="btn btn-outline-secondary" data-view="mask_overlay" data-seg-tab="1">Mask</button>
+            <button type="button" class="btn btn-outline-secondary" data-view="boxes" data-seg-tab="1">Boxes</button>
           </div>
         </div>
+        <p id="viewer-note" class="small text-secondary d-none mb-2"></p>
         <div class="viewer-frame" id="viewer-frame">
           <img id="main-image" alt="Prediction visualization" class="img-fluid">
           <div id="bbox-highlight" class="bbox-highlight d-none"></div>
@@ -83,8 +84,11 @@
         <dl class="row mb-0 summary-grid">
           <dt class="col-6">Resolution</dt><dd class="col-6" id="info-resolution">—</dd>
           <dt class="col-6">File Size</dt><dd class="col-6" id="info-size">—</dd>
-          <dt class="col-6">Mode</dt><dd class="col-6" id="info-mode">—</dd>
+          <dt class="col-6">Requested Mode</dt><dd class="col-6" id="info-requested-mode">—</dd>
+          <dt class="col-6">Resolved Mode</dt><dd class="col-6" id="info-resolved-mode">—</dd>
           <dt class="col-6">Fallback</dt><dd class="col-6" id="info-fallback">—</dd>
+          <dt class="col-6">Raw Instances</dt><dd class="col-6" id="info-raw-instances">—</dd>
+          <dt class="col-6">Valid Instances</dt><dd class="col-6" id="info-valid-instances">—</dd>
           <dt class="col-6">Preprocessing</dt><dd class="col-6" id="info-preprocess">—</dd>
           <dt class="col-6">Segmentation</dt><dd class="col-6" id="info-segmentation">—</dd>
           <dt class="col-6">Classification</dt><dd class="col-6" id="info-classification">—</dd>

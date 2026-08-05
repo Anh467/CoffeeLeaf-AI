@@ -152,10 +152,11 @@ class InferenceService:
             payload = self._run_pipeline(
                 image=image,
                 bundle=bundle,
-                mode=predict_mode,
+                requested_mode=predict_mode,
             )
         total_ms = (time.perf_counter() - total_started) * 1000.0
 
+        draw_annotations = payload["resolved_mode"] != "single_leaf"
         viz_started = time.perf_counter()
         enriched_leaves = visualization_service.write_leaf_artifacts(
             run_dir,
@@ -170,6 +171,7 @@ class InferenceService:
             payload["healthy_label"],
             payload["disease_classes"],
             run_dir / "overlay.jpg",
+            draw_annotations=draw_annotations,
         )
         mask_path = visualization_service.save_mask_overlay(
             image,
@@ -177,12 +179,14 @@ class InferenceService:
             payload["masks"],
             payload["healthy_label"],
             run_dir / "mask_overlay.jpg",
+            draw_annotations=draw_annotations,
         )
         boxes_path = visualization_service.save_boxes_overlay(
             image,
             payload["leaves"],
             run_dir / "boxes.jpg",
             healthy_label=payload["healthy_label"],
+            draw_annotations=draw_annotations,
         )
         thumbnail_path = visualization_service.save_thumbnail(
             image, run_dir / "thumbnail.jpg"
@@ -193,15 +197,16 @@ class InferenceService:
             payload["leaves"],
             payload["healthy_label"],
             disease_classes=payload["disease_classes"],
-            mode=payload["mode"],
+            mode=payload["resolved_mode"],
             fallback_to_single_leaf=payload["fallback_to_single_leaf"],
         )
-        message = None
-        if summary["total_leaves"] == 0:
-            message = (
-                "No leaves detected. Try Auto mode for close-up fallback, "
-                "or upload a clearer whole-tree photo."
-            )
+        response_leaves = [
+            self._serialize_leaf(leaf, prediction_id, payload["healthy_label"])
+            for leaf in enriched_leaves
+        ]
+        self._assert_prediction_consistency(summary, response_leaves)
+
+        message = self._build_message(payload, summary)
 
         processing = {
             "preprocess_time_ms": float(payload["timing"]["preprocess_ms"]),
@@ -209,8 +214,13 @@ class InferenceService:
             "classification_time_ms": float(payload["timing"]["classification_ms"]),
             "visualization_time_ms": float(visualization_ms),
             "total_time_ms": float(total_ms),
-            "mode": payload["mode"],
+            # Legacy field mirrors resolved mode for older clients.
+            "mode": payload["resolved_mode"],
+            "requested_mode": payload["requested_mode"],
+            "resolved_mode": payload["resolved_mode"],
             "fallback_to_single_leaf": bool(payload["fallback_to_single_leaf"]),
+            "raw_instances": int(payload["raw_instances"]),
+            "valid_instances": int(payload["valid_instances"]),
             "segmenter": payload["segmenter"],
             "classifier": payload["classifier"],
         }
@@ -227,6 +237,18 @@ class InferenceService:
             ),
         }
 
+        LOGGER.info(
+            "Prediction requested_mode=%s resolved_mode=%s raw_instances=%d "
+            "valid_instances=%d leaves=%d fallback=%s segmentation_ms=%.1f",
+            processing["requested_mode"],
+            processing["resolved_mode"],
+            processing["raw_instances"],
+            processing["valid_instances"],
+            len(response_leaves),
+            processing["fallback_to_single_leaf"],
+            processing["segmentation_time_ms"],
+        )
+
         response = {
             "id": prediction_id,
             "image": {
@@ -234,15 +256,12 @@ class InferenceService:
                 "height": image.size[1],
                 "file_size": file_size,
                 "filename": Path(filename).name,
-                "mode": payload["mode"],
+                "mode": payload["resolved_mode"],
             },
             "processing": processing,
             "model": model_info,
             "summary": summary,
-            "leaves": [
-                self._serialize_leaf(leaf, prediction_id, payload["healthy_label"])
-                for leaf in enriched_leaves
-            ],
+            "leaves": response_leaves,
             "visualizations": {
                 "original": self._media_url(prediction_id, original_path.name),
                 "overlay": self._media_url(prediction_id, overlay_path.name),
@@ -316,30 +335,37 @@ class InferenceService:
         *,
         image: Image.Image,
         bundle: InferenceBundle,
-        mode: PredictMode,
+        requested_mode: PredictMode,
     ) -> dict[str, Any]:
         fallback = False
         segmentation_ms = 0.0
+        raw_instances = 0
+        valid_instances = 0
 
-        if mode == "single_leaf":
+        if requested_mode == "single_leaf":
             prepared = classification_service.prepare_single_leaf_crop(image, bundle)
             used_masks = prepared["masks"]
-            effective_mode: PredictMode = "single_leaf"
+            resolved_mode: PredictMode = "single_leaf"
+            valid_instances = len(prepared["leaves"])
         else:
             segmentation = segmentation_service.segment_leaves(image, bundle)
             segmentation_ms = float(segmentation["elapsed_ms"])
+            raw_instances = int(segmentation.get("raw_instances", 0))
             instances = segmentation["instances"]
+            valid_instances = len(instances)
             if instances:
                 prepared = classification_service.prepare_leaf_crops(
                     image, instances, bundle
                 )
                 used_masks = prepared["masks"]
-                effective_mode = "whole_image" if mode == "whole_image" else "auto"
-            elif mode == "auto":
+                # Successful segmentation resolves to whole_image regardless of auto.
+                resolved_mode = "whole_image"
+            elif requested_mode == "auto":
                 fallback = True
                 prepared = classification_service.prepare_single_leaf_crop(image, bundle)
                 used_masks = prepared["masks"]
-                effective_mode = "single_leaf"
+                resolved_mode = "single_leaf"
+                valid_instances = len(prepared["leaves"])
             else:
                 # whole_image with zero detections: return empty result, no crash.
                 prepared = {
@@ -350,14 +376,20 @@ class InferenceService:
                     "masks": [],
                 }
                 used_masks = []
-                effective_mode = "whole_image"
+                resolved_mode = "whole_image"
+                valid_instances = 0
 
         classified = classification_service.classify_crops(
             prepared["tensors"], prepared["leaves"], bundle
         )
         return {
-            "mode": effective_mode,
+            "requested_mode": requested_mode,
+            "resolved_mode": resolved_mode,
+            # Legacy alias used by older callers/tests.
+            "mode": resolved_mode,
             "fallback_to_single_leaf": fallback,
+            "raw_instances": raw_instances,
+            "valid_instances": valid_instances,
             "timing": {
                 "preprocess_ms": float(prepared["elapsed_ms"]),
                 "segmentation_ms": segmentation_ms,
@@ -373,6 +405,47 @@ class InferenceService:
             "deploy_ready": bool(bundle.manifest["deploy_ready"]),
             "manifest": bundle.manifest,
         }
+
+    @staticmethod
+    def _assert_prediction_consistency(
+        summary: dict[str, Any],
+        leaves: list[dict[str, Any]],
+    ) -> None:
+        total = int(summary.get("total_leaves", 0))
+        healthy = int(summary.get("healthy_leaves", 0))
+        diseased = int(summary.get("diseased_leaves", 0))
+        if total != len(leaves):
+            raise RuntimeError(
+                f"Inconsistent prediction: total_leaves={total} but len(leaves)={len(leaves)}"
+            )
+        if healthy + diseased != total:
+            raise RuntimeError(
+                "Inconsistent prediction: "
+                f"healthy_leaves({healthy}) + diseased_leaves({diseased}) != total_leaves({total})"
+            )
+
+    @staticmethod
+    def _build_message(payload: dict[str, Any], summary: dict[str, Any]) -> str | None:
+        resolved = payload["resolved_mode"]
+        requested = payload["requested_mode"]
+        if resolved == "single_leaf":
+            notes = [
+                "Single-leaf mode treats the entire image as one leaf. "
+                "Leaf segmentation and leaf counting are not performed.",
+                "Marks visible in Original are part of the uploaded image, not model predictions.",
+            ]
+            if payload["fallback_to_single_leaf"]:
+                notes.insert(
+                    0,
+                    "Auto mode found no valid leaf instances and fell back to single-leaf classification.",
+                )
+            return " ".join(notes)
+        if summary["total_leaves"] == 0 and requested == "whole_image":
+            return (
+                "No leaves detected. Try Auto mode for close-up fallback, "
+                "or upload a clearer whole-tree photo."
+            )
+        return None
 
     def _serialize_leaf(
         self,
@@ -457,7 +530,14 @@ class InferenceService:
         processing = dict(payload.get("processing") or {})
         processing.setdefault("visualization_time_ms", 0.0)
         processing.setdefault("mode", payload.get("image", {}).get("mode", "auto"))
+        processing.setdefault("requested_mode", processing.get("mode", "auto"))
+        processing.setdefault("resolved_mode", processing.get("mode", "auto"))
         processing.setdefault("fallback_to_single_leaf", False)
+        processing.setdefault("raw_instances", 0)
+        processing.setdefault(
+            "valid_instances",
+            int((payload.get("summary") or {}).get("total_leaves", 0)),
+        )
         processing.setdefault("segmenter", (payload.get("model") or {}).get("segmenter"))
         processing.setdefault("classifier", (payload.get("model") or {}).get("classifier"))
         payload["processing"] = processing

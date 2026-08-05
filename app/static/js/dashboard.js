@@ -8,6 +8,13 @@
     unknown: "#505050",
   };
 
+  const MODE_LABELS = {
+    auto: "Auto detect leaves",
+    whole_image: "Whole image segmentation",
+    single_leaf: "Single leaf",
+    tree: "Whole image segmentation",
+  };
+
   const form = document.getElementById("predict-form");
   const input = document.getElementById("image-input");
   const dropZone = document.getElementById("drop-zone");
@@ -16,11 +23,42 @@
   const predictMode = document.getElementById("predict-mode");
   const results = document.getElementById("results");
   const resultMessage = document.getElementById("result-message");
+  const viewerNote = document.getElementById("viewer-note");
   const mainImage = document.getElementById("main-image");
   const viewerFrame = document.getElementById("viewer-frame");
   const bboxHighlight = document.getElementById("bbox-highlight");
   const leafList = document.getElementById("leaf-list");
   const leafDetail = document.getElementById("leaf-detail");
+
+  const SUMMARY_IDS = [
+    "stat-total",
+    "stat-diseased",
+    "stat-confidence",
+    "stat-time",
+    "sum-total",
+    "sum-healthy",
+    "sum-diseased",
+    "sum-miner",
+    "sum-rust",
+    "sum-phoma",
+    "sum-multi",
+    "sum-confidence",
+  ];
+  const INFO_IDS = [
+    "info-resolution",
+    "info-size",
+    "info-requested-mode",
+    "info-resolved-mode",
+    "info-fallback",
+    "info-raw-instances",
+    "info-valid-instances",
+    "info-preprocess",
+    "info-segmentation",
+    "info-classification",
+    "info-total",
+    "info-segmenter",
+    "info-classifier",
+  ];
 
   let selectedFile = null;
   let currentResult = null;
@@ -39,6 +77,11 @@
 
   function formatPct(value) {
     return `${(Number(value || 0) * 100).toFixed(1)}%`;
+  }
+
+  function modeLabel(value) {
+    if (!value) return "—";
+    return MODE_LABELS[value] || String(value);
   }
 
   function leafLabel(leaf) {
@@ -81,7 +124,75 @@
     return Number((summary.class_counts || {})[name] || 0);
   }
 
+  function isSingleLeafResult(result) {
+    const processing = result?.processing || {};
+    return (
+      processing.resolved_mode === "single_leaf" ||
+      processing.mode === "single_leaf" ||
+      result?.image?.mode === "single_leaf"
+    );
+  }
+
+  function setActiveView(view) {
+    currentView = view;
+    document.querySelectorAll("[data-view]").forEach((node) => {
+      node.classList.toggle("active", node.getAttribute("data-view") === view);
+    });
+  }
+
+  function updateSegmentationTabs(enabled) {
+    document.querySelectorAll("[data-seg-tab]").forEach((button) => {
+      button.disabled = !enabled;
+      button.classList.toggle("d-none", !enabled);
+    });
+    if (!enabled && (currentView === "mask_overlay" || currentView === "boxes" || currentView === "mask")) {
+      setActiveView("original");
+    }
+  }
+
+  function resetPredictionUI() {
+    currentResult = null;
+    selectedLeaf = null;
+    mainImage.removeAttribute("src");
+    mainImage.onload = null;
+    leafList.innerHTML = "";
+    leafDetail.textContent = "Chọn một lá ở danh sách bên trái.";
+    bboxHighlight.classList.add("d-none");
+    results.classList.add("d-none");
+    resultMessage.classList.add("d-none");
+    resultMessage.textContent = "";
+    if (viewerNote) {
+      viewerNote.classList.add("d-none");
+      viewerNote.textContent = "";
+    }
+    SUMMARY_IDS.forEach((id) => {
+      const node = document.getElementById(id);
+      if (node) node.textContent = "—";
+    });
+    INFO_IDS.forEach((id) => {
+      const node = document.getElementById(id);
+      if (node) node.textContent = "—";
+    });
+    setActiveView("overlay");
+    updateSegmentationTabs(true);
+    document.querySelectorAll(".leaf-item").forEach((node) => node.classList.remove("active"));
+  }
+
+  // Expose for unit-style checks in the browser console / tests.
+  window.__coffeeLeafDashboard = {
+    resetPredictionUI,
+    getState: () => ({
+      currentResult,
+      selectedLeaf,
+      currentView,
+      mainImageSrc: mainImage.getAttribute("src"),
+      resultsHidden: results.classList.contains("d-none"),
+      leafCount: leafList.children.length,
+    }),
+  };
+
   function setFile(file) {
+    resetPredictionUI();
     selectedFile = file;
     fileName.textContent = file ? file.name : "";
     predictBtn.disabled = !file;
@@ -102,12 +213,19 @@
     const file = input.files?.[0];
     if (file) setFile(file);
   });
+  predictMode.addEventListener("change", () => {
+    resetPredictionUI();
+    const mode = predictMode.value || "auto";
+    updateSegmentationTabs(mode !== "single_leaf");
+    if (mode === "single_leaf") {
+      setActiveView("original");
+    }
+  });
 
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.addEventListener("click", () => {
-      currentView = button.getAttribute("data-view");
-      document.querySelectorAll("[data-view]").forEach((node) => node.classList.remove("active"));
-      button.classList.add("active");
+      if (button.disabled) return;
+      setActiveView(button.getAttribute("data-view"));
       if (currentResult?.visualizations?.[currentView]) {
         mainImage.src = currentResult.visualizations[currentView];
       } else if (currentView === "mask" && currentResult?.visualizations?.mask_overlay) {
@@ -135,9 +253,18 @@
 
     document.getElementById("info-resolution").textContent = `${image.width} × ${image.height}`;
     document.getElementById("info-size").textContent = formatBytes(image.file_size);
-    document.getElementById("info-mode").textContent = processing.mode || image.mode;
+    document.getElementById("info-requested-mode").textContent = modeLabel(
+      processing.requested_mode || predictMode.value
+    );
+    document.getElementById("info-resolved-mode").textContent = modeLabel(
+      processing.resolved_mode || processing.mode || image.mode
+    );
     document.getElementById("info-fallback").textContent =
-      processing.fallback_to_single_leaf || summary.fallback_to_single_leaf ? "yes" : "no";
+      processing.fallback_to_single_leaf || summary.fallback_to_single_leaf ? "Yes" : "No";
+    document.getElementById("info-raw-instances").textContent =
+      processing.raw_instances ?? "—";
+    document.getElementById("info-valid-instances").textContent =
+      processing.valid_instances ?? summary.total_leaves;
     document.getElementById("info-preprocess").textContent = formatMs(processing.preprocess_time_ms);
     document.getElementById("info-segmentation").textContent = formatMs(processing.segmentation_time_ms);
     document.getElementById("info-classification").textContent = formatMs(processing.classification_time_ms);
@@ -147,7 +274,12 @@
   }
 
   function updateHighlight() {
-    if (!selectedLeaf || !currentResult || !mainImage.naturalWidth) {
+    if (
+      !selectedLeaf ||
+      !currentResult ||
+      !mainImage.naturalWidth ||
+      isSingleLeafResult(currentResult)
+    ) {
       bboxHighlight.classList.add("d-none");
       return;
     }
@@ -173,7 +305,8 @@
   function renderLeafDetail(leaf) {
     selectedLeaf = leaf;
     const probabilities = leaf.probabilities || {};
-    const box = bboxOf(leaf);
+    const singleLeaf = isSingleLeafResult(currentResult);
+    const box = singleLeaf ? null : bboxOf(leaf);
     const rows = Object.entries(probabilities)
       .map(([name, value]) => {
         const pct = Math.max(0, Math.min(100, Number(value) * 100));
@@ -202,12 +335,16 @@
           <div class="mb-1">Prediction: <strong>${leafLabel(leaf)}</strong></div>
           <div class="mb-1">Labels: <strong>${(leaf.labels || []).join(", ") || "—"}</strong></div>
           <div class="mb-1">Classification confidence: <strong>${formatPct(classificationConfidence)}</strong></div>
-          <div class="mb-1">Segmentation confidence: <strong>${formatPct(segmentationConfidence)}</strong></div>
+          <div class="mb-1">Segmentation confidence:
+            <strong>${singleLeaf ? "n/a (single-leaf)" : formatPct(segmentationConfidence)}</strong>
+          </div>
           <div class="mb-3">Bounding box:
             <strong>${
               box
                 ? `(${box.x1}, ${box.y1}, ${box.x2}, ${box.y2})`
-                : "—"
+                : singleLeaf
+                  ? "n/a (whole image classified)"
+                  : "—"
             }</strong>
           </div>
           <div class="mb-2 text-secondary">Probabilities</div>
@@ -254,9 +391,25 @@
     } else {
       resultMessage.classList.add("d-none");
     }
+
+    const singleLeaf = isSingleLeafResult(result);
+    updateSegmentationTabs(!singleLeaf);
+    if (singleLeaf) {
+      setActiveView("original");
+      if (viewerNote) {
+        viewerNote.textContent =
+          "Marks visible in Original are part of the uploaded image, not model predictions.";
+        viewerNote.classList.remove("d-none");
+      }
+    } else if (viewerNote) {
+      viewerNote.classList.add("d-none");
+      viewerNote.textContent = "";
+    }
+
     const viz =
       result.visualizations[currentView] ||
       (currentView === "mask" ? result.visualizations.mask_overlay : null) ||
+      result.visualizations.original ||
       result.visualizations.overlay;
     mainImage.src = viz;
     mainImage.onload = () => updateHighlight();
@@ -267,6 +420,7 @@
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!selectedFile) return;
+    resetPredictionUI();
     predictBtn.disabled = true;
     predictBtn.textContent = "Predicting...";
     try {
@@ -280,6 +434,7 @@
       }
       showResult(payload);
     } catch (error) {
+      resetPredictionUI();
       alert(error.message || String(error));
     } finally {
       predictBtn.disabled = !selectedFile;
