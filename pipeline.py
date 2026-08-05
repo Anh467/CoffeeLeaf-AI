@@ -32,7 +32,12 @@ from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-CLASSIFIER_ARCHITECTURES = {"efficientnet_v2_s", "regnet_y_3_2gf"}
+CLASSIFIER_ARCHITECTURES = {
+    "convnext_tiny",
+    "densenet121",
+    "efficientnet_v2_s",
+    "regnet_y_3_2gf",
+}
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
@@ -1007,8 +1012,12 @@ def build_classifier(
 ) -> tuple[Any, Any]:
     from torch import nn
     from torchvision.models import (
+        ConvNeXt_Tiny_Weights,
+        DenseNet121_Weights,
         EfficientNet_V2_S_Weights,
         RegNet_Y_3_2GF_Weights,
+        convnext_tiny,
+        densenet121,
         efficientnet_v2_s,
         regnet_y_3_2gf,
     )
@@ -1043,6 +1052,36 @@ def build_classifier(
             nn.Dropout(dropout), nn.Linear(input_features, number_of_classes)
         )
         head = model.fc
+    elif name == "convnext_tiny":
+        weights = ConvNeXt_Tiny_Weights.DEFAULT if pretrained else None
+        model = convnext_tiny(weights=weights)
+        for parameter in model.features.parameters():
+            parameter.requires_grad = False
+        blocks = list(model.features.children())
+        if unfreeze_blocks > 0:
+            for block in blocks[-unfreeze_blocks:]:
+                for parameter in block.parameters():
+                    parameter.requires_grad = True
+        input_features = model.classifier[-1].in_features
+        model.classifier[-1] = nn.Sequential(
+            nn.Dropout(dropout), nn.Linear(input_features, number_of_classes)
+        )
+        head = model.classifier
+    elif name == "densenet121":
+        weights = DenseNet121_Weights.DEFAULT if pretrained else None
+        model = densenet121(weights=weights)
+        for parameter in model.features.parameters():
+            parameter.requires_grad = False
+        blocks = list(model.features.children())
+        if unfreeze_blocks > 0:
+            for block in blocks[-unfreeze_blocks:]:
+                for parameter in block.parameters():
+                    parameter.requires_grad = True
+        input_features = model.classifier.in_features
+        model.classifier = nn.Sequential(
+            nn.Dropout(dropout), nn.Linear(input_features, number_of_classes)
+        )
+        head = model.classifier
     else:
         raise ValueError(f"Unsupported classifier candidate: {name}")
 
@@ -1480,11 +1519,25 @@ def log_bundle_run(
             ROOT / "params.yaml",
             ROOT / "dvc.yaml",
             ROOT / "metrics" / "data.json",
+            ROOT / "metrics" / "classification_eda.json",
             ROOT / "metrics" / "segmenters.json",
             ROOT / "metrics" / "classifiers.json",
             ROOT / "metrics" / "selection.json",
         ):
             mlflow.log_artifact(str(artifact), artifact_path="reproducibility")
+        for artifact in (
+            ROOT / "metrics" / "classifiers.csv",
+            ROOT / "metrics" / "classification_eda.png",
+            ROOT / "metrics" / "classifier_training_curves.png",
+            ROOT / "metrics" / "classifier_comparison.png",
+            ROOT / "metrics" / "classifier_confusion_matrices.png",
+        ):
+            if artifact.is_file():
+                mlflow.log_artifact(str(artifact), artifact_path="analysis")
+        candidate_dir = ROOT / "models" / "classifiers"
+        for pattern in ("*_history.csv", "*_report.json"):
+            for artifact in sorted(candidate_dir.glob(pattern)):
+                mlflow.log_artifact(str(artifact), artifact_path="analysis/candidates")
         return str(active_run.info.run_id)
 
 
@@ -1940,6 +1993,45 @@ def doctor(config: dict[str, Any], check_data: bool) -> None:
             raise ValueError("data.mask_fill_rgb must contain three values from 0 to 255")
     except (TypeError, ValueError) as error:
         errors.append(str(error))
+    classification_settings = config.get("classification", {})
+    augmentation = classification_settings.get("augmentation", {})
+    try:
+        crop_scale = [float(value) for value in augmentation.get("crop_scale", [])]
+        if (
+            len(crop_scale) != 2
+            or not 0.0 < crop_scale[0] <= crop_scale[1] <= 1.0
+        ):
+            raise ValueError(
+                "classification.augmentation.crop_scale must be two ordered "
+                "values in (0, 1]"
+            )
+        crop_ratio = [float(value) for value in augmentation.get("crop_ratio", [])]
+        if len(crop_ratio) != 2 or not 0.0 < crop_ratio[0] <= crop_ratio[1]:
+            raise ValueError(
+                "classification.augmentation.crop_ratio must be two positive "
+                "ordered values"
+            )
+        for name in (
+            "gaussian_blur_probability",
+            "random_erasing_probability",
+        ):
+            probability = float(augmentation.get(name, -1.0))
+            if not 0.0 <= probability <= 1.0:
+                raise ValueError(
+                    f"classification.augmentation.{name} must be between 0 and 1"
+                )
+        rotation = float(augmentation.get("rotation_degrees", -1.0))
+        jitter = float(augmentation.get("color_jitter", -1.0))
+        if not 0.0 <= rotation <= 180.0:
+            raise ValueError(
+                "classification.augmentation.rotation_degrees must be between 0 and 180"
+            )
+        if not 0.0 <= jitter <= 1.0:
+            raise ValueError(
+                "classification.augmentation.color_jitter must be between 0 and 1"
+            )
+    except (TypeError, ValueError) as error:
+        errors.append(str(error))
     try:
         classifier_threshold = float(
             config.get("deployment", {}).get("classifier_confidence", -1.0)
@@ -1979,15 +2071,26 @@ def doctor(config: dict[str, Any], check_data: bool) -> None:
         < 0.0
     ):
         errors.append("dagshub.promotion.min_score_improvement must be non-negative")
-    for candidate, settings in (
-        config.get("classification", {}).get("candidates", {}).items()
-    ):
-        architecture = str(settings.get("architecture", candidate))
-        if architecture not in CLASSIFIER_ARCHITECTURES:
-            errors.append(
-                f"classification candidate {candidate!r} uses unsupported "
-                f"architecture {architecture!r}"
+    for candidate, settings in classification_settings.get("candidates", {}).items():
+        try:
+            architecture = str(settings.get("architecture", candidate))
+            if architecture not in CLASSIFIER_ARCHITECTURES:
+                raise ValueError(
+                    f"uses unsupported architecture {architecture!r}"
+                )
+            if int(settings.get("image_size", 0)) <= 0:
+                raise ValueError("image_size must be positive")
+            if not 0.0 <= float(settings.get("dropout", -1.0)) < 1.0:
+                raise ValueError("dropout must be in [0, 1)")
+            if int(settings.get("unfreeze_blocks", -1)) < 0:
+                raise ValueError("unfreeze_blocks must be non-negative")
+            batch_size = int(
+                settings.get("batch_size", classification_settings.get("batch_size", 0))
             )
+            if batch_size <= 0:
+                raise ValueError("batch_size must be positive")
+        except (TypeError, ValueError) as error:
+            errors.append(f"classification candidate {candidate!r} {error}")
     data_summary: dict[str, Any] = {}
     if check_data and not errors:
         try:
@@ -2035,6 +2138,8 @@ def doctor(config: dict[str, Any], check_data: bool) -> None:
         "ipykernel",
         "jupyterlab",
         "mlflow",
+        "matplotlib",
+        "seaborn",
         "torch",
         "torchvision",
         "ultralytics",
