@@ -1788,7 +1788,31 @@ def decode_multilabel_prediction(
     }
 
 
-def predict(source: Path, output_dir: Path, bundle_dir: Path) -> None:
+@dataclass
+class InferenceBundle:
+    """Loaded deployment bundle kept warm for repeated inference calls."""
+
+    deployment_dir: Path
+    manifest: dict[str, Any]
+    detector: Any
+    classifier: Any
+    device: Any
+    transform: Any
+    disease_classes: list[str]
+    healthy_label: str
+    classifier_image_size: int
+
+    @property
+    def segmenter_name(self) -> str:
+        return str(self.manifest["segmenter"]["candidate"])
+
+    @property
+    def classifier_name(self) -> str:
+        return str(self.manifest["classifier"]["candidate"])
+
+
+def load_inference_bundle(bundle_dir: Path | str = "deployment") -> InferenceBundle:
+    """Load YOLO segmenter + multi-label classifier once from a deployment bundle."""
     try:
         import torch
         from torchvision import transforms
@@ -1797,24 +1821,21 @@ def predict(source: Path, output_dir: Path, bundle_dir: Path) -> None:
         raise RuntimeError("Install requirements.txt before inference") from error
 
     deployment_dir = project_path(bundle_dir)
-    manifest = json.loads(
-        (deployment_dir / "manifest.json").read_text(encoding="utf-8")
-    )
-    if (
-        sha256_file(deployment_dir / "leaf_segmenter.pt")
-        != manifest["segmenter"]["sha256"]
-    ):
+    manifest_path = deployment_dir / "manifest.json"
+    segmenter_path = deployment_dir / "leaf_segmenter.pt"
+    classifier_path = deployment_dir / "leaf_classifier.pt"
+    for path in (manifest_path, segmenter_path, classifier_path):
+        if not path.exists():
+            raise FileNotFoundError(f"Missing deployment artifact: {path}")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if sha256_file(segmenter_path) != manifest["segmenter"]["sha256"]:
         raise RuntimeError("Segmenter checksum does not match deployment manifest")
-    if (
-        sha256_file(deployment_dir / "leaf_classifier.pt")
-        != manifest["classifier"]["sha256"]
-    ):
+    if sha256_file(classifier_path) != manifest["classifier"]["sha256"]:
         raise RuntimeError("Classifier checksum does not match deployment manifest")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint = torch.load(
-        deployment_dir / "leaf_classifier.pt", map_location=device, weights_only=False
-    )
+    checkpoint = torch.load(classifier_path, map_location=device, weights_only=False)
     if checkpoint.get("classification_mode") != "multilabel":
         raise RuntimeError("Classifier checkpoint is not a multi-label disease model")
     disease_classes = list(checkpoint["disease_classes"])
@@ -1836,20 +1857,165 @@ def predict(source: Path, output_dir: Path, bundle_dir: Path) -> None:
             transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
         ]
     )
-    detector = YOLO(str(deployment_dir / "leaf_segmenter.pt"))
-    results = detector.predict(
-        source=str(source),
-        conf=float(manifest["thresholds"]["detector_confidence"]),
-        imgsz=int(manifest["segmenter"]["image_size"]),
+    detector = YOLO(str(segmenter_path))
+    return InferenceBundle(
+        deployment_dir=deployment_dir,
+        manifest=manifest,
+        detector=detector,
+        classifier=classifier,
+        device=device,
+        transform=transform,
+        disease_classes=disease_classes,
+        healthy_label=healthy_label,
+        classifier_image_size=image_size,
+    )
+
+
+def crop_leaf_instance(
+    image: Image.Image,
+    mask: Image.Image,
+    box: Sequence[float],
+    manifest: dict[str, Any],
+) -> tuple[Image.Image, list[int]]:
+    width, height = image.size
+    x1, y1, x2, y2 = [round(value) for value in box]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    padding = float(manifest["preprocessing"]["crop_padding_ratio"])
+    pad_x, pad_y = round((x2 - x1) * padding), round((y2 - y1) * padding)
+    crop_box = (
+        max(0, x1 - pad_x),
+        max(0, y1 - pad_y),
+        min(width, x2 + pad_x),
+        min(height, y2 + pad_y),
+    )
+    crop = image.crop(crop_box)
+    if manifest["preprocessing"]["mask_background"]:
+        crop_mask = mask.crop(crop_box)
+        background = Image.new(
+            "RGB", crop.size, tuple(manifest["preprocessing"]["mask_fill_rgb"])
+        )
+        crop = Image.composite(crop, background, crop_mask)
+    return crop, [x1, y1, x2, y2]
+
+
+def classify_leaf_crops(
+    bundle: InferenceBundle,
+    crop_tensors: Sequence[Any],
+) -> list[dict[str, Any]]:
+    import torch
+
+    if not crop_tensors:
+        return []
+    batch = torch.stack(list(crop_tensors)).to(bundle.device)
+    with torch.inference_mode():
+        probabilities = bundle.classifier(batch).sigmoid().cpu()
+    threshold = float(bundle.manifest["thresholds"]["classifier_confidence"])
+    decoded: list[dict[str, Any]] = []
+    for probability in probabilities:
+        decoded.append(
+            decode_multilabel_prediction(
+                probability.tolist(),
+                bundle.disease_classes,
+                bundle.healthy_label,
+                threshold,
+            )
+        )
+    return decoded
+
+
+def build_prediction_summary(
+    leaves: Sequence[dict[str, Any]],
+    healthy_label: str,
+) -> dict[str, Any]:
+    accepted = [leaf for leaf in leaves if leaf.get("accepted")]
+    counts: Counter[str] = Counter()
+    for leaf in accepted:
+        counts.update(leaf["predicted_labels"])
+    diseased = sum(
+        any(name != healthy_label for name in leaf["predicted_labels"])
+        for leaf in accepted
+    )
+    return {
+        "detected_leaves": len(leaves),
+        "accepted_classifications": len(accepted),
+        "class_counts": dict(counts),
+        "diseased_leaf_fraction": diseased / len(accepted) if accepted else None,
+    }
+
+
+def render_annotated_prediction(
+    image: Image.Image,
+    leaves: Sequence[dict[str, Any]],
+    masks: Sequence[Image.Image],
+    healthy_label: str,
+    disease_classes: Sequence[str],
+) -> Image.Image:
+    """Draw instance masks, boxes and multi-label text onto a copy of the image."""
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    colors = [
+        (64, 180, 75, 75),
+        (255, 179, 0, 75),
+        (225, 87, 89, 75),
+        (116, 78, 170, 75),
+    ]
+    output_classes = [healthy_label, *disease_classes]
+    for leaf, mask in zip(leaves, masks):
+        class_name = leaf.get("primary_label", "unknown")
+        class_index = (
+            output_classes.index(class_name) if class_name in output_classes else 0
+        )
+        color = colors[class_index % len(colors)]
+        color_layer = Image.new("RGBA", image.size, color)
+        overlay.alpha_composite(
+            Image.composite(color_layer, Image.new("RGBA", image.size), mask)
+        )
+        box = leaf["bbox_xyxy"]
+        label_names = "+".join(leaf.get("predicted_labels", [class_name]))
+        label = f"{label_names} {leaf.get('classification_confidence', 0.0):.2f}"
+        overlay_draw.rectangle(box, outline=color[:3] + (255,), width=3)
+        overlay_draw.text(
+            (box[0] + 3, max(0, box[1] - 13)), label, fill=color[:3] + (255,)
+        )
+    return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+
+
+def run_inference(
+    image: Image.Image,
+    bundle: InferenceBundle,
+    *,
+    allow_single_leaf_fallback: bool = True,
+) -> dict[str, Any]:
+    """Run segmentation + multi-label classification on an in-memory RGB image.
+
+    When the segmenter finds no leaves and ``allow_single_leaf_fallback`` is true,
+    the whole image is treated as a single leaf crop (close-up photos).
+    """
+    import time
+
+    rgb = image.convert("RGB")
+    width, height = rgb.size
+    timing: dict[str, float] = {
+        "preprocess_ms": 0.0,
+        "segmentation_ms": 0.0,
+        "classification_ms": 0.0,
+    }
+
+    started = time.perf_counter()
+    detection = bundle.detector.predict(
+        source=np.asarray(rgb),
+        conf=float(bundle.manifest["thresholds"]["detector_confidence"]),
+        imgsz=int(bundle.manifest["segmenter"]["image_size"]),
         verbose=False,
     )
-    if len(results) != 1:
-        raise ValueError("predict currently accepts exactly one image")
-    result = results[0]
-    with Image.open(source) as opened:
-        image = opened.convert("RGB")
-    width, height = image.size
+    timing["segmentation_ms"] = (time.perf_counter() - started) * 1000.0
+    if len(detection) != 1:
+        raise ValueError("Inference currently accepts exactly one image")
+    result = detection[0]
+
     leaves: list[dict[str, Any]] = []
+    crop_images: list[Image.Image] = []
     crop_tensors: list[Any] = []
     masks: list[Image.Image] = []
     boxes = [] if result.boxes is None else result.boxes.xyxy.cpu().tolist()
@@ -1864,98 +2030,103 @@ def predict(source: Path, output_dir: Path, bundle_dir: Path) -> None:
             )
             masks.append(mask)
 
-    for index, (mask, box) in enumerate(zip(masks, boxes)):
-        x1, y1, x2, y2 = [round(value) for value in box]
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(width, x2), min(height, y2)
-        padding = float(manifest["preprocessing"]["crop_padding_ratio"])
-        pad_x, pad_y = round((x2 - x1) * padding), round((y2 - y1) * padding)
-        crop_box = (
-            max(0, x1 - pad_x),
-            max(0, y1 - pad_y),
-            min(width, x2 + pad_x),
-            min(height, y2 + pad_y),
-        )
-        crop = image.crop(crop_box)
-        if manifest["preprocessing"]["mask_background"]:
-            crop_mask = mask.crop(crop_box)
-            background = Image.new(
-                "RGB", crop.size, tuple(manifest["preprocessing"]["mask_fill_rgb"])
+    mode = "tree"
+    if masks and boxes:
+        preprocess_started = time.perf_counter()
+        for index, (mask, box) in enumerate(zip(masks, boxes)):
+            crop, bbox = crop_leaf_instance(rgb, mask, box, bundle.manifest)
+            crop_images.append(crop)
+            crop_tensors.append(bundle.transform(crop))
+            leaves.append(
+                {
+                    "leaf_id": index,
+                    "bbox_xyxy": bbox,
+                    "detector_confidence": float(detector_confidences[index]),
+                }
             )
-            crop = Image.composite(crop, background, crop_mask)
-        crop_tensors.append(transform(crop))
-        leaves.append(
+        timing["preprocess_ms"] = (time.perf_counter() - preprocess_started) * 1000.0
+    elif allow_single_leaf_fallback:
+        mode = "single_leaf"
+        preprocess_started = time.perf_counter()
+        full_mask = Image.new("L", (width, height), 255)
+        masks = [full_mask]
+        crop_images = [rgb]
+        crop_tensors = [bundle.transform(rgb)]
+        leaves = [
             {
-                "leaf_id": index,
-                "bbox_xyxy": [x1, y1, x2, y2],
-                "detector_confidence": float(detector_confidences[index]),
+                "leaf_id": 0,
+                "bbox_xyxy": [0, 0, width, height],
+                "detector_confidence": 1.0,
             }
-        )
+        ]
+        timing["preprocess_ms"] = (time.perf_counter() - preprocess_started) * 1000.0
+        timing["segmentation_ms"] = 0.0
 
-    if crop_tensors:
-        batch = torch.stack(crop_tensors).to(device)
-        with torch.inference_mode():
-            probabilities = classifier(batch).sigmoid().cpu()
-        threshold = float(manifest["thresholds"]["classifier_confidence"])
-        for leaf, probability in zip(leaves, probabilities):
-            leaf.update(
-                decode_multilabel_prediction(
-                    probability.tolist(),
-                    disease_classes,
-                    healthy_label,
-                    threshold,
-                )
-            )
+    classify_started = time.perf_counter()
+    decoded = classify_leaf_crops(bundle, crop_tensors)
+    timing["classification_ms"] = (time.perf_counter() - classify_started) * 1000.0
+    for leaf, prediction in zip(leaves, decoded):
+        leaf.update(prediction)
 
-    accepted = [leaf for leaf in leaves if leaf.get("accepted")]
-    counts: Counter[str] = Counter()
-    for leaf in accepted:
-        counts.update(leaf["predicted_labels"])
-    diseased = sum(
-        any(name != healthy_label for name in leaf["predicted_labels"])
-        for leaf in accepted
-    )
+    summary = build_prediction_summary(leaves, bundle.healthy_label)
+    return {
+        "mode": mode,
+        "image_size": {"width": width, "height": height},
+        "deploy_ready": bool(bundle.manifest["deploy_ready"]),
+        "timing": timing,
+        "summary": summary,
+        "leaves": leaves,
+        "masks": masks,
+        "crops": crop_images,
+        "image": rgb,
+        "disease_classes": list(bundle.disease_classes),
+        "healthy_label": bundle.healthy_label,
+        "segmenter": bundle.segmenter_name,
+        "classifier": bundle.classifier_name,
+        "manifest": bundle.manifest,
+    }
+
+
+def predict(source: Path, output_dir: Path, bundle_dir: Path) -> None:
+    """CLI-compatible two-stage inference that writes result.json + annotated.jpg."""
+    bundle = load_inference_bundle(bundle_dir)
+    with Image.open(source) as opened:
+        image = opened.convert("RGB")
+    inference = run_inference(image, bundle, allow_single_leaf_fallback=True)
     payload = {
         "source": str(source),
-        "deploy_ready": bool(manifest["deploy_ready"]),
-        "summary": {
-            "detected_leaves": len(leaves),
-            "accepted_classifications": len(accepted),
-            "class_counts": dict(counts),
-            "diseased_leaf_fraction": diseased / len(accepted) if accepted else None,
-        },
-        "leaves": leaves,
+        "deploy_ready": inference["deploy_ready"],
+        "mode": inference["mode"],
+        "summary": inference["summary"],
+        "leaves": [
+            {
+                key: value
+                for key, value in leaf.items()
+                if key
+                in {
+                    "leaf_id",
+                    "bbox_xyxy",
+                    "detector_confidence",
+                    "predicted_labels",
+                    "primary_label",
+                    "classification_confidence",
+                    "accepted",
+                    "probabilities",
+                }
+            }
+            for leaf in inference["leaves"]
+        ],
     }
     output_dir = reset_dir(output_dir)
     write_json(output_dir / "result.json", payload)
-
-    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
-    colors = [
-        (64, 180, 75, 75),
-        (255, 179, 0, 75),
-        (225, 87, 89, 75),
-        (116, 78, 170, 75),
-    ]
-    for index, (leaf, mask) in enumerate(zip(leaves, masks)):
-        class_name = leaf.get("primary_label", "unknown")
-        output_classes = [healthy_label, *disease_classes]
-        class_index = output_classes.index(class_name) if class_name in output_classes else 0
-        color = colors[class_index % len(colors)]
-        color_layer = Image.new("RGBA", image.size, color)
-        overlay.alpha_composite(
-            Image.composite(color_layer, Image.new("RGBA", image.size), mask)
-        )
-        box = leaf["bbox_xyxy"]
-        label_names = "+".join(leaf.get("predicted_labels", [class_name]))
-        label = f"{label_names} {leaf.get('classification_confidence', 0.0):.2f}"
-        overlay_draw.rectangle(box, outline=color[:3] + (255,), width=3)
-        overlay_draw.text(
-            (box[0] + 3, max(0, box[1] - 13)), label, fill=color[:3] + (255,)
-        )
-    Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB").save(
-        output_dir / "annotated.jpg", quality=95
+    annotated = render_annotated_prediction(
+        inference["image"],
+        inference["leaves"],
+        inference["masks"],
+        inference["healthy_label"],
+        inference["disease_classes"],
     )
+    annotated.save(output_dir / "annotated.jpg", quality=95)
     print(json.dumps(payload["summary"], ensure_ascii=False, indent=2))
 
 
