@@ -1,11 +1,49 @@
+# Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments and secrets
+.env
+.env.*
+!.env.example
 .venv/
-.idea/
+venv/
+
+# IDE
 .vscode/
-runs/
+.idea/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary user inputs and predictions
+data/temp/
+data/tmp/
+temp/
+tmp/
+
+# Local experiment/cache outputs
 mlruns/
+runs/
+.ipynb_checkpoints/
 notebooks/*.executed.ipynb
+
+# Generated DVC plots
+dvc_plots/
+dvc_plots/static/
+
+# Model checkpoints not tracked through DVC
+# Pretrained Ultralytics weights (yolo11n-seg.pt, yolo11s-seg.pt, …) download on demand.
+# Trained/deployed bundles live under models/ and deployment/ (DVC outs below).
+*.pt
+*.pth
+*.ckpt
+*.onnx
 
 # DVC owns processed data and generated model bundles. Track the two independent
 # raw sources with `dvc add data/raw/segmentation data/raw/classification`.
