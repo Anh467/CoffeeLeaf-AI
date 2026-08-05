@@ -71,3 +71,252 @@ stages:
       hash: md5
       md5: 63f257ef9a92346a1efe9f2f291cad91
       size: 1193
+  train_segmenters:
+    cmd: papermill notebooks/train_leaf_segmentation.ipynb 
+      notebooks/train_leaf_segmentation.executed.ipynb --cwd . -p params_path 
+      params.yaml
+    deps:
+    - path: data/processed/segmentation
+      hash: md5
+      md5: 9d630c7079d2f2cfbc2cf82536bc5ed3.dir
+      size: 2438795926
+      nfiles: 604
+    - path: notebooks/train_leaf_segmentation.ipynb
+      hash: md5
+      md5: e497f3eb0155b3ea432defaf1d4eee98
+      size: 9135
+    - path: pipeline.py
+      hash: md5
+      md5: 962418236b75d378506dc16fa21f55c4
+      size: 84573
+    params:
+      params.yaml:
+        seed: 42
+        segmentation:
+          candidates:
+            yolo11n_seg: yolo11n-seg.pt
+            yolo11s_seg: yolo11s-seg.pt
+          image_size: 640
+          epochs: 100
+          batch_size: 4
+          patience: 20
+          workers: 0
+          device: auto
+          pretrained: true
+          deterministic: true
+    outs:
+    - path: metrics/segmenters.csv
+      hash: md5
+      md5: 4a75d22f5950167f2899c1b698d94373
+      size: 221
+    - path: metrics/segmenters.json
+      hash: md5
+      md5: facf5c994d38f9dee3807e26f28d83d3
+      size: 937
+    - path: models/segmenters
+      hash: md5
+      md5: 6bcc9f4f2ef73abb709e8aaf5e8d827c.dir
+      size: 26509192
+      nfiles: 2
+  train_classifiers:
+    cmd: papermill notebooks/train_disease_classification.ipynb 
+      notebooks/train_disease_classification.executed.ipynb --cwd . -p 
+      params_path params.yaml
+    deps:
+    - path: data/processed/classification
+      hash: md5
+      md5: 153ce798d474005a11c16b50f6317907.dir
+      size: 225879414
+      nfiles: 3330
+    - path: notebooks/train_disease_classification.ipynb
+      hash: md5
+      md5: eea66259b5914c579395cce5cfcd6332
+      size: 26159
+    - path: pipeline.py
+      hash: md5
+      md5: 962418236b75d378506dc16fa21f55c4
+      size: 84573
+    params:
+      params.yaml:
+        classification:
+          candidates:
+            efficientnet_v2_s:
+              architecture: efficientnet_v2_s
+              image_size: 300
+              dropout: 0.4
+              unfreeze_blocks: 3
+            regnet_y_3_2gf:
+              architecture: regnet_y_3_2gf
+              image_size: 224
+              dropout: 0.3
+              unfreeze_blocks: 1
+          epochs: 20
+          batch_size: 8
+          workers: 0
+          pretrained: true
+          backbone_lr: 1e-05
+          head_lr: 0.001
+          weight_decay: 0.01
+          label_smoothing: 0.05
+          patience: 6
+        data.disease_classes:
+        - miner
+        - rust
+        - phoma
+        data.healthy_label: healthy
+        data.mask_background: true
+        data.mask_fill_rgb:
+        - 124
+        - 116
+        - 104
+        deployment.classifier_confidence: 0.5
+        seed: 42
+    outs:
+    - path: metrics/classifiers.csv
+      hash: md5
+      md5: ddc3556a7b78efbaebd3176bee3ed3cb
+      size: 225
+    - path: metrics/classifiers.json
+      hash: md5
+      md5: 806b6193801ccc64b615d14fd071cda3
+      size: 5728
+    - path: models/classifiers
+      hash: md5
+      md5: b84a9a5694bf7685a483cad5a8cc076a.dir
+      size: 153807838
+      nfiles: 6
+  select:
+    cmd: python pipeline.py select
+    deps:
+    - path: data/processed/dataset_manifest.json
+      hash: md5
+      md5: 4107e260c08dc5f5c8407c9fb14976f9
+      size: 2244
+    - path: metrics/classifiers.json
+      hash: md5
+      md5: 806b6193801ccc64b615d14fd071cda3
+      size: 5728
+    - path: metrics/segmenters.json
+      hash: md5
+      md5: facf5c994d38f9dee3807e26f28d83d3
+      size: 937
+    - path: models/classifiers
+      hash: md5
+      md5: b84a9a5694bf7685a483cad5a8cc076a.dir
+      size: 153807838
+      nfiles: 6
+    - path: models/segmenters
+      hash: md5
+      md5: 6bcc9f4f2ef73abb709e8aaf5e8d827c.dir
+      size: 26509192
+      nfiles: 2
+    - path: pipeline.py
+      hash: md5
+      md5: 962418236b75d378506dc16fa21f55c4
+      size: 84573
+    params:
+      params.yaml:
+        classification.candidates:
+          efficientnet_v2_s:
+            architecture: efficientnet_v2_s
+            image_size: 300
+            dropout: 0.4
+            unfreeze_blocks: 3
+          regnet_y_3_2gf:
+            architecture: regnet_y_3_2gf
+            image_size: 224
+            dropout: 0.3
+            unfreeze_blocks: 1
+        data.disease_classes:
+        - miner
+        - rust
+        - phoma
+        data.healthy_label: healthy
+        deployment:
+          detector_confidence: 0.25
+          classifier_confidence: 0.5
+          image_size: 640
+          export_onnx: false
+          onnx_opset: 17
+        selection:
+          deployment_weights:
+            segmenter_map50_95: 0.35
+            segmenter_recall: 0.15
+            classifier_macro_f1: 0.35
+            classifier_min_class_recall: 0.15
+          segmentation:
+            min_map50_95: 0.45
+            min_recall: 0.65
+            weights:
+              map50_95: 0.7
+              recall: 0.2
+              latency: 0.07
+              size: 0.03
+          classification:
+            min_macro_f1: 0.85
+            min_class_recall: 0.7
+            weights:
+              macro_f1: 0.7
+              min_class_recall: 0.2
+              latency: 0.07
+              size: 0.03
+    outs:
+    - path: deployment
+      hash: md5
+      md5: 5ed64feebf98d8324daffc7ac0b10dbb.dir
+      size: 78172830
+      nfiles: 3
+    - path: metrics/leaderboard.csv
+      hash: md5
+      md5: c6e403a33d2e7c76a19c912bad75ec4a
+      size: 302
+    - path: metrics/selection.json
+      hash: md5
+      md5: 2de9f5ae16036df4b9ac90799f79daad
+      size: 233
+  publish:
+    cmd: python pipeline.py publish
+    deps:
+    - path: deployment
+      hash: md5
+      md5: 5ed64feebf98d8324daffc7ac0b10dbb.dir
+      size: 78172830
+      nfiles: 3
+    - path: metrics/classifiers.json
+      hash: md5
+      md5: 806b6193801ccc64b615d14fd071cda3
+      size: 5728
+    - path: metrics/data.json
+      hash: md5
+      md5: 63f257ef9a92346a1efe9f2f291cad91
+      size: 1193
+    - path: metrics/segmenters.json
+      hash: md5
+      md5: facf5c994d38f9dee3807e26f28d83d3
+      size: 937
+    - path: metrics/selection.json
+      hash: md5
+      md5: 2de9f5ae16036df4b9ac90799f79daad
+      size: 233
+    - path: pipeline.py
+      hash: md5
+      md5: 962418236b75d378506dc16fa21f55c4
+      size: 84573
+    params:
+      params.yaml:
+        dagshub:
+          enabled: true
+          repo_owner: Anh467
+          repo_name: CoffeeLeaf-AI
+          experiment_name: coffee-leaf-training
+          registered_model_name: CoffeeLeaf-AI-Pipeline
+          promotion:
+            min_score_improvement: 0.005
+            allow_first_model: true
+            allow_evaluation_change: false
+            required_git_branch: main
+    outs:
+    - path: metrics/publish.json
+      hash: md5
+      md5: 369d24f3c7c9301dbbd4e323f4f10f91
+      size: 279

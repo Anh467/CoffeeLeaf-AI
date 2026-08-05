@@ -1,25 +1,32 @@
 seed: 42
 data:
   processed_dir: data/processed
-  splits: [train, val, test]
+  splits:
+  - train
+  - val
+  - test
   healthy_label: healthy
-  disease_classes: [miner, rust, phoma]
+  disease_classes:
+  - miner
+  - rust
+  - phoma
   segmentation:
     source_name: BRACOT
     source_url: https://data.mendeley.com/datasets/pmkbyjpf6k/1
     raw_dir: data/raw/segmentation/bracot
     annotation_format: via
     # Leave empty to auto-discover VIA JSON files anywhere below raw_dir.
-    annotations_file: ""
+    annotations_file: ''
     # Optional CSV with image,split,group_id. Without it, split is deterministic.
-    manifest_file: ""
+    manifest_file: ''
     split_ratios:
       train: 0.70
       val: 0.15
       test: 0.15
   classification:
     source_name: Coffee leaf diseases (Kaggle)
-    source_url: https://www.kaggle.com/datasets/badasstechie/coffee-leaf-diseases
+    source_url: 
+      https://www.kaggle.com/datasets/badasstechie/coffee-leaf-diseases
     raw_dir: data/raw/classification/coffee-leaf-diseases
     train_labels_file: train_classes.csv
     test_labels_file: test_classes.csv
@@ -32,18 +39,21 @@ data:
     validation_fraction: 0.15
   # Shared by Kaggle mask preprocessing and segmenter crops at inference.
   mask_background: true
-  mask_fill_rgb: [124, 116, 104]
+  mask_fill_rgb:
+  - 124
+  - 116
+  - 104
   crop_padding_ratio: 0.05
   min_crop_size: 32
 segmentation:
   candidates:
     yolo11n_seg: yolo11n-seg.pt
     yolo11s_seg: yolo11s-seg.pt
-  image_size: 1280
+  image_size: 640
   epochs: 100
   batch_size: 4
   patience: 20
-  workers: 4
+  workers: 0
   device: auto
   pretrained: true
   deterministic: true
@@ -60,8 +70,8 @@ classification:
       dropout: 0.3
       unfreeze_blocks: 1
   epochs: 20
-  batch_size: 32
-  workers: 4
+  batch_size: 8
+  workers: 0
   pretrained: true
   backbone_lr: 1.0e-05
   head_lr: 0.001
@@ -94,7 +104,7 @@ selection:
 deployment:
   detector_confidence: 0.25
   classifier_confidence: 0.5
-  image_size: 1280
+  image_size: 640
   export_onnx: false
   onnx_opset: 17
 dagshub:

@@ -1,0 +1,8 @@
+{
+  "classifier_quality_gate_passed": 1,
+  "classifier_score": 0.9166000003969641,
+  "deploy_ready": 1,
+  "deployment_score": 0.857673533498086,
+  "segmenter_quality_gate_passed": 1,
+  "segmenter_score": 0.8317653031727399
+}

@@ -1,0 +1,232 @@
+{
+  "candidates": {
+    "efficientnet_v2_s": {
+      "accuracy": 0.9896373056994818,
+      "decision_threshold": 0.5,
+      "disease_macro_f1": 0.9935897435897436,
+      "hamming_loss": 0.0034542314335060447,
+      "image_size": 300,
+      "latency_ms": 27.073419999942416,
+      "macro_f1": 0.9951923076923077,
+      "micro_f1": 0.995049504950495,
+      "min_class_recall": 1.0,
+      "size_mb": 77.85129833221436,
+      "test_accuracy": 0.9475,
+      "test_disease_macro_f1": 0.9681353529984941,
+      "test_hamming_loss": 0.0175,
+      "test_macro_f1": 0.9717155498365899,
+      "test_micro_f1": 0.9700598802395209,
+      "test_min_class_recall": 0.9655172413793104,
+      "test_per_class": {
+        "healthy": {
+          "confusion_matrix": [
+            [
+              284,
+              0
+            ],
+            [
+              4,
+              112
+            ]
+          ],
+          "f1": 0.9824561403508771,
+          "precision": 1.0,
+          "recall": 0.9655172413793104,
+          "support": 116
+        },
+        "miner": {
+          "confusion_matrix": [
+            [
+              262,
+              10
+            ],
+            [
+              1,
+              127
+            ]
+          ],
+          "f1": 0.9584905660377359,
+          "precision": 0.927007299270073,
+          "recall": 0.9921875,
+          "support": 128
+        },
+        "phoma": {
+          "confusion_matrix": [
+            [
+              296,
+              8
+            ],
+            [
+              0,
+              96
+            ]
+          ],
+          "f1": 0.96,
+          "precision": 0.9230769230769231,
+          "recall": 1.0,
+          "support": 96
+        },
+        "rust": {
+          "confusion_matrix": [
+            [
+              328,
+              0
+            ],
+            [
+              2,
+              70
+            ]
+          ],
+          "f1": 0.9859154929577465,
+          "precision": 1.0,
+          "recall": 0.9722222222222222,
+          "support": 72
+        }
+      },
+      "validation_per_class": {
+        "healthy": {
+          "f1": 1.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "support": 43
+        },
+        "miner": {
+          "f1": 0.9807692307692307,
+          "precision": 0.9622641509433962,
+          "recall": 1.0,
+          "support": 51
+        },
+        "phoma": {
+          "f1": 1.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "support": 59
+        },
+        "rust": {
+          "f1": 1.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "support": 48
+        }
+      }
+    },
+    "regnet_y_3_2gf": {
+      "accuracy": 0.8963730569948186,
+      "decision_threshold": 0.5,
+      "disease_macro_f1": 0.9304435823916344,
+      "hamming_loss": 0.037996545768566495,
+      "image_size": 224,
+      "latency_ms": 21.094163333327742,
+      "macro_f1": 0.9207242530587859,
+      "micro_f1": 0.9238329238329238,
+      "min_class_recall": 0.8604651162790697,
+      "size_mb": 68.8239278793335,
+      "test_accuracy": 0.885,
+      "test_disease_macro_f1": 0.91591679083667,
+      "test_hamming_loss": 0.0425,
+      "test_macro_f1": 0.9138098398235377,
+      "test_micro_f1": 0.9146919431279621,
+      "test_min_class_recall": 0.8879310344827587,
+      "test_per_class": {
+        "healthy": {
+          "confusion_matrix": [
+            [
+              276,
+              8
+            ],
+            [
+              13,
+              103
+            ]
+          ],
+          "f1": 0.9074889867841409,
+          "precision": 0.9279279279279279,
+          "recall": 0.8879310344827587,
+          "support": 116
+        },
+        "miner": {
+          "confusion_matrix": [
+            [
+              262,
+              10
+            ],
+            [
+              13,
+              115
+            ]
+          ],
+          "f1": 0.9090909090909091,
+          "precision": 0.92,
+          "recall": 0.8984375,
+          "support": 128
+        },
+        "phoma": {
+          "confusion_matrix": [
+            [
+              295,
+              9
+            ],
+            [
+              0,
+              96
+            ]
+          ],
+          "f1": 0.9552238805970149,
+          "precision": 0.9142857142857143,
+          "recall": 1.0,
+          "support": 96
+        },
+        "rust": {
+          "confusion_matrix": [
+            [
+              309,
+              19
+            ],
+            [
+              0,
+              72
+            ]
+          ],
+          "f1": 0.8834355828220859,
+          "precision": 0.7912087912087912,
+          "recall": 1.0,
+          "support": 72
+        }
+      },
+      "validation_per_class": {
+        "healthy": {
+          "f1": 0.891566265060241,
+          "precision": 0.925,
+          "recall": 0.8604651162790697,
+          "support": 43
+        },
+        "miner": {
+          "f1": 0.9142857142857143,
+          "precision": 0.8888888888888888,
+          "recall": 0.9411764705882353,
+          "support": 51
+        },
+        "phoma": {
+          "f1": 0.9586776859504132,
+          "precision": 0.9354838709677419,
+          "recall": 0.9830508474576272,
+          "support": 59
+        },
+        "rust": {
+          "f1": 0.9183673469387755,
+          "precision": 0.9,
+          "recall": 0.9375,
+          "support": 48
+        }
+      }
+    }
+  },
+  "classification_mode": "multilabel",
+  "decision_threshold": 0.5,
+  "disease_classes": [
+    "miner",
+    "rust",
+    "phoma"
+  ],
+  "healthy_label": "healthy"
+}

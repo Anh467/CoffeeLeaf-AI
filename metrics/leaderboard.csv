@@ -1,0 +1,5 @@
+candidate,type,score,quality_gate_passed,selected
+segmenter/yolo11n_seg,segmentation,0.8317653031727399,1,1
+segmenter/yolo11s_seg,segmentation,0.7555441758767394,1,0
+classifier/efficientnet_v2_s,classification,0.8966346153846154,1,0
+classifier/regnet_y_3_2gf,classification,0.9166000003969641,1,1
