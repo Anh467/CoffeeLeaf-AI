@@ -71,11 +71,21 @@ stages:
     metrics:
       - metrics/classifiers.json:
           cache: false
+      - metrics/classification_eda.json:
+          cache: false
     plots:
       - metrics/classifiers.csv:
           cache: false
           x: candidate
           y: macro_f1
+      - metrics/classification_eda.png:
+          cache: false
+      - metrics/classifier_training_curves.png:
+          cache: false
+      - metrics/classifier_comparison.png:
+          cache: false
+      - metrics/classifier_confusion_matrices.png:
+          cache: false
 
   select:
     cmd: python pipeline.py select
@@ -111,8 +121,14 @@ stages:
       - pipeline.py
       - deployment
       - metrics/data.json
+      - metrics/classification_eda.json
+      - metrics/classification_eda.png
+      - metrics/classifier_training_curves.png
+      - metrics/classifier_comparison.png
+      - metrics/classifier_confusion_matrices.png
       - metrics/segmenters.json
       - metrics/classifiers.json
+      - metrics/classifiers.csv
       - metrics/selection.json
     params:
       - dagshub
