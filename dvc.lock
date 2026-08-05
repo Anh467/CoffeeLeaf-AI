@@ -78,17 +78,17 @@ stages:
     deps:
     - path: data/processed/segmentation
       hash: md5
-      md5: 9d630c7079d2f2cfbc2cf82536bc5ed3.dir
-      size: 2438795926
-      nfiles: 604
+      md5: 4b54b4f59f06d7e6a07cc4e00759ce5e.dir
+      size: 2258964618
+      nfiles: 603
     - path: notebooks/train_leaf_segmentation.ipynb
       hash: md5
       md5: 975afadc32c930022ead245800bdea11
       size: 31782
     - path: pipeline.py
       hash: md5
-      md5: 0dab36d72dff146d0d0f8d33c8d0bb62
-      size: 95139
+      md5: 3eefd7f39faa869ace88259ebb7d819a
+      size: 97542
     params:
       params.yaml:
         seed: 42
@@ -107,17 +107,17 @@ stages:
     outs:
     - path: metrics/segmenters.csv
       hash: md5
-      md5: c20e431033e012053a849e12fc3b45ad
-      size: 349
+      md5: fd698d6c2bd7d595f51c79c771b06490
+      size: 668
     - path: metrics/segmenters.json
       hash: md5
-      md5: 3f301ca949cc20332b7d944142d40667
-      size: 1191
+      md5: 50e4b4a77fa98214d358557e111c53ed
+      size: 1155
     - path: models/segmenters
       hash: md5
-      md5: e20528c72279d9eaef8f5dee11ec4a43.dir
-      size: 26541748
-      nfiles: 4
+      md5: 0b28980bb36b7f3a26e59234a38b0229.dir
+      size: 59064237
+      nfiles: 5
   train_classifiers:
     cmd: papermill notebooks/train_disease_classification.ipynb 
       notebooks/train_disease_classification.executed.ipynb --cwd . -p 
@@ -249,13 +249,13 @@ stages:
       nfiles: 12
     - path: models/segmenters
       hash: md5
-      md5: b70fb6668eb7acf3d7a13f54114c6cce.dir
-      size: 59248181
+      md5: 0b28980bb36b7f3a26e59234a38b0229.dir
+      size: 59064237
       nfiles: 5
     - path: pipeline.py
       hash: md5
-      md5: 0dab36d72dff146d0d0f8d33c8d0bb62
-      size: 95139
+      md5: 3eefd7f39faa869ace88259ebb7d819a
+      size: 97542
     params:
       params.yaml:
         classification.candidates:
@@ -316,8 +316,8 @@ stages:
     outs:
     - path: deployment
       hash: md5
-      md5: eab4684da6fe1da89479729492c08098.dir
-      size: 117548046
+      md5: f661547859393906d68047d86106555f.dir
+      size: 117364102
       nfiles: 3
     - path: metrics/leaderboard.csv
       hash: md5
@@ -332,8 +332,8 @@ stages:
     deps:
     - path: deployment
       hash: md5
-      md5: eab4684da6fe1da89479729492c08098.dir
-      size: 117548046
+      md5: f661547859393906d68047d86106555f.dir
+      size: 117364102
       nfiles: 3
     - path: metrics/classification_eda.json
       hash: md5
@@ -377,8 +377,8 @@ stages:
       size: 234
     - path: pipeline.py
       hash: md5
-      md5: 0dab36d72dff146d0d0f8d33c8d0bb62
-      size: 95139
+      md5: 3eefd7f39faa869ace88259ebb7d819a
+      size: 97542
     params:
       params.yaml:
         dagshub:
@@ -395,5 +395,5 @@ stages:
     outs:
     - path: metrics/publish.json
       hash: md5
-      md5: 052ed0c9c47d6a165342fc54ab4d5319
-      size: 306
+      md5: 1b81b2bd5cededf90386e50d3231b901
+      size: 309

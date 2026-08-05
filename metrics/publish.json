@@ -1,13 +1,13 @@
 {
   "branch_allowed": 1,
-  "champion_score_before": 0.857673533498,
+  "champion_score_before": 0.892691456978,
   "deploy_ready": 1,
   "deployment_score": 0.8926914569779285,
   "enabled": 1,
-  "is_champion": 1,
-  "model_version": 2,
-  "promoted": 1,
+  "is_champion": 0,
+  "model_version": 3,
+  "promoted": 0,
   "published": 1,
   "same_evaluation": 1,
-  "score_improvement": 0.03501792347992849
+  "score_improvement": -7.149836278586008e-14
 }
