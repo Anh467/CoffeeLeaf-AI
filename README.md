@@ -25,6 +25,8 @@ thể đồng thời mang `miner` và `rust`.
 notebooks/train_leaf_segmentation.ipynb      # training YOLO segmentation
 notebooks/train_disease_classification.ipynb # training classifier
 pipeline.py       # prepare, select, publish, inference, doctor và model contract
+main.py           # FastAPI entrypoint (REST API + dashboard)
+app/              # API routes, services, schemas, templates, static
 params.yaml       # dữ liệu, hyperparameters, quality gates
 dvc.yaml          # DAG: prepare -> hai notebook train -> select -> publish
 data/raw/segmentation/   # BRACOT + VIA JSON, do DVC quản lý
@@ -32,6 +34,7 @@ data/raw/classification/ # Kaggle images + masks + CSV, do DVC quản lý
 metrics/          # JSON/CSV nhỏ để DVC so sánh thí nghiệm
 models/           # checkpoint ứng viên do DVC cache
 deployment/       # cặp model thắng + manifest/checksum do DVC cache
+runs/history/     # kết quả predict từ web API (SQLite + ảnh overlay)
 ```
 
 Hai notebook chứa training loop thật và có thể mở bằng JupyterLab để theo dõi.
@@ -311,10 +314,124 @@ Tỉ lệ lá bệnh chỉ là chỉ báo thị giác, không thay thế đánh 
 ảnh quá xa làm lá rất nhỏ, nên hướng dẫn người dùng tiến gần hơn hoặc chụp nhiều
 ảnh bao phủ từng phần tán cây.
 
-## 5. Kiểm tra nhanh
+## 5. Web Dashboard và REST API
+
+Tầng serving dùng đúng bundle trong `deployment/` (`leaf_segmenter.pt`,
+`leaf_classifier.pt`, `manifest.json`). Không train lại model; dashboard chỉ là
+client của REST API.
+
+### Chạy server
 
 ```bash
-python -m py_compile pipeline.py
+# Cần có deployment bundle
+dvc pull deployment
+
+python -m pip install -r requirements.txt
+uvicorn main:app --reload
+```
+
+Mở:
+
+- Dashboard: [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
+- History page: [http://127.0.0.1:8000/history-page](http://127.0.0.1:8000/history-page)
+- OpenAPI docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+
+Model được load **một lần** khi server khởi động và inference được khóa
+thread-safe. Nếu segmenter không tìm thấy lá, hệ thống tự chuyển sang chế độ
+`single_leaf` (phân loại cả ảnh như một lá close-up).
+
+### REST API
+
+| Method | Path | Mô tả |
+|---|---|---|
+| `GET` | `/` | Web dashboard |
+| `GET` | `/health` | Trạng thái load model |
+| `POST` | `/predict` | Upload ảnh (`multipart/form-data`, field `image`) |
+| `GET` | `/history` | Danh sách lịch sử predict |
+| `GET` | `/history/{id}` | Chi tiết một lần predict |
+| `DELETE` | `/history/{id}` | Xóa metadata + artifact trên đĩa |
+| `GET` | `/history-page` | Trang HTML xem lịch sử |
+
+Ví dụ gọi API:
+
+```bash
+curl -X POST http://127.0.0.1:8000/predict \
+  -F "image=@path/to/tree_or_leaf.jpg"
+```
+
+Response JSON (rút gọn):
+
+```json
+{
+  "id": "...",
+  "image": {"width": 4032, "height": 3024, "file_size": 1234567, "filename": "tree.jpg", "mode": "tree"},
+  "processing": {
+    "preprocess_time_ms": 12.3,
+    "segmentation_time_ms": 45.6,
+    "classification_time_ms": 18.0,
+    "total_time_ms": 90.1
+  },
+  "model": {
+    "segmenter": "yolo11n_seg",
+    "classifier": "convnext_tiny",
+    "version": "3",
+    "deploy_ready": true
+  },
+  "summary": {
+    "total_leaves": 12,
+    "healthy_leaves": 8,
+    "diseased_leaves": 4,
+    "average_confidence": 0.91,
+    "detected_diseases": ["miner", "rust"]
+  },
+  "leaves": [
+    {
+      "leaf_id": 1,
+      "prediction": "rust",
+      "confidence": 0.96,
+      "probabilities": {"healthy": 0.04, "miner": 0.01, "rust": 0.96, "phoma": 0.11}
+    }
+  ],
+  "visualizations": {
+    "original": "/media/history/.../original.jpg",
+    "overlay": "/media/history/.../overlay.jpg",
+    "mask_overlay": "/media/history/.../mask_overlay.jpg",
+    "boxes": "/media/history/.../boxes.jpg"
+  }
+}
+```
+
+Classifier vẫn là **multi-label**: một lá có thể là `miner+rust`. `healthy` chỉ
+được gán khi mọi bệnh đều dưới `classifier_confidence` trong manifest.
+
+Artifact được lưu dưới `runs/history/{id}/` (ảnh gốc, overlay, crop từng lá,
+mask, `result.json`). SQLite chỉ lưu path + metadata, không lưu blob ảnh.
+
+### Kiến trúc thư mục app
+
+```text
+app/
+  api/routes.py
+  services/
+    inference_service.py
+    segmentation_service.py
+    classification_service.py
+    visualization_service.py
+    statistics_service.py
+  schemas/
+  database/
+  templates/
+  static/
+main.py
+```
+
+Các client tương lai (Android, Flutter, React, Mini Zalo…) chỉ cần gọi
+`POST /predict`.
+
+## 6. Kiểm tra nhanh
+
+```bash
+python -m py_compile pipeline.py main.py
 python -c "import json; json.load(open('notebooks/train_leaf_segmentation.ipynb', encoding='utf-8'))"
 python -c "import json; json.load(open('notebooks/train_disease_classification.ipynb', encoding='utf-8'))"
 python pipeline.py doctor
