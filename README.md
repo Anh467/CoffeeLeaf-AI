@@ -6,8 +6,9 @@ model nối tiếp và hai nguồn dữ liệu đúng với từng nhiệm vụ:
 1. [BRACOT](https://data.mendeley.com/datasets/pmkbyjpf6k/1) train YOLO instance
    segmentation để tách từng lá khỏi ảnh cây.
 2. [Coffee leaf diseases trên Kaggle](https://www.kaggle.com/datasets/badasstechie/coffee-leaf-diseases/data)
-   train EfficientNetV2-S hoặc RegNetY-3.2GF với ba đầu ra độc lập `miner`,
-   `rust`, `phoma`; `healthy` được suy ra khi cả ba đều âm tính.
+   so sánh EfficientNetV2-S, RegNetY-3.2GF, ConvNeXt-Tiny và DenseNet121 với ba
+   đầu ra độc lập `miner`, `rust`, `phoma`; `healthy` được suy ra khi cả ba đều
+   âm tính.
 3. DVC huấn luyện các ứng viên, lưu metrics, áp quality gate và đóng gói cặp
    model phù hợp nhất vào `deployment/`.
 4. MLflow trên DagsHub ghi lại experiment, đăng ký challenger và chỉ chuyển
@@ -163,8 +164,9 @@ Các stage:
 - `train_segmenters`: Papermill thực thi `train_leaf_segmentation.ipynb`, mặc
   định so sánh `yolo11n-seg` và `yolo11s-seg` trên validation.
 - `train_classifiers`: Papermill thực thi
-  `train_disease_classification.ipynb`, mặc định so sánh EfficientNetV2-S và
-  RegNetY-3.2GF.
+  `train_disease_classification.ipynb`, mặc định so sánh EfficientNetV2-S,
+  RegNetY-3.2GF, ConvNeXt-Tiny và DenseNet121. Notebook áp augmentation nhẹ,
+  xuất EDA, training curves, confusion matrices và biểu đồ metric sau training.
 - `select`: quality gate trước, sau đó tính điểm tổng hợp giữa chất lượng,
   latency và kích thước checkpoint.
 - `publish`: log bundle/params/metrics/fingerprint lên DagsHub MLflow, so sánh
@@ -198,9 +200,11 @@ trùng. Nhờ vậy candidate được train ở feature branch có thể đư�
 merge và chạy pipeline trên `main`.
 
 Tên key của classifier là tên experiment; trường `architecture` chọn backbone
-được hỗ trợ (`efficientnet_v2_s` hoặc `regnet_y_3_2gf`). Vì vậy có thể khai báo
-nhiều cấu hình của cùng một backbone với image size/dropout khác nhau mà không
-sửa code. Candidate YOLO nhận trực tiếp tên/path weight Ultralytics.
+được hỗ trợ (`efficientnet_v2_s`, `regnet_y_3_2gf`, `convnext_tiny` hoặc
+`densenet121`). Vì vậy có thể khai báo nhiều cấu hình của cùng một backbone với
+image size/dropout khác nhau mà không sửa code. `batch_size` có thể đặt riêng
+cho từng candidate; cấu hình ConvNeXt mặc định dùng batch 4 để vừa GPU 6 GB.
+Candidate YOLO nhận trực tiếp tên/path weight Ultralytics.
 
 ### Quy tắc lựa chọn mặc định
 
@@ -245,6 +249,11 @@ Kết quả quan trọng:
 ```text
 metrics/segmenters.json
 metrics/classifiers.json
+metrics/classification_eda.json
+metrics/classification_eda.png
+metrics/classifier_training_curves.png
+metrics/classifier_comparison.png
+metrics/classifier_confusion_matrices.png
 metrics/selection.json
 metrics/publish.json
 metrics/leaderboard.csv
@@ -259,9 +268,11 @@ deployment/manifest.json
 cần export cho runtime khác.
 
 Trên DagsHub, mỗi run chứa bundle và các file tái lập (`params.yaml`, `dvc.yaml`,
-metrics). Model Registry dùng stage `Production` và alias `champion` làm hợp đồng
-triển khai. Việc promote này không tự tạo inference server; service triển khai có
-thể tải đúng bundle production bằng MLflow:
+metrics). Thư mục artifact `analysis/` chứa EDA, training curves, confusion
+matrices, CSV so sánh và report/history của tất cả classifier candidate; weight
+của mọi candidate vẫn do DVC quản lý. Model Registry dùng stage `Production` và
+alias `champion` làm hợp đồng triển khai. Việc promote này không tự tạo inference
+server; service triển khai có thể tải đúng bundle production bằng MLflow:
 
 ```python
 import dagshub
