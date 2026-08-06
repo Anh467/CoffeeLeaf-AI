@@ -18,6 +18,10 @@ body {
   font-family: "Segoe UI", "Trebuchet MS", sans-serif;
 }
 
+body.modal-open {
+  overflow: hidden;
+}
+
 .app-nav {
   background: rgba(255, 253, 249, 0.92);
   backdrop-filter: blur(8px);
@@ -28,18 +32,117 @@ body {
   color: var(--leaf-deep) !important;
 }
 
+.brand-title {
+  display: block;
+  font-size: 1.15rem;
+  line-height: 1.2;
+}
+
+.brand-subtitle {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--muted) !important;
+  margin-left: 0.75rem;
+}
+
+.navbar-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 0.15rem;
+}
+
+.home-title {
+  font-size: clamp(1.8rem, 3vw, 2.4rem);
+  font-weight: 700;
+  color: var(--leaf-deep);
+  margin-bottom: 0.75rem;
+}
+
+.home-lead {
+  max-width: 42rem;
+  margin: 0 auto;
+  color: var(--muted);
+  font-size: 1.05rem;
+}
+
+.home-upload {
+  max-width: 640px;
+}
+
+.upload-panel,
 .stat-card,
 .panel,
-.upload-panel,
-.drop-zone {
+.drop-zone,
+.error-card {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 18px;
 }
 
+.upload-panel {
+  padding: 1.25rem;
+  box-shadow: 0 12px 28px rgba(36, 48, 40, 0.05);
+}
+
+.drop-zone {
+  border-style: dashed;
+  padding: 2.6rem 1.5rem;
+  text-align: center;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.drop-zone.dragover {
+  border-color: var(--leaf);
+  background: #eef6ef;
+}
+
+.file-preview-wrap {
+  display: flex;
+  justify-content: center;
+}
+
+.file-preview {
+  max-width: min(100%, 360px);
+  max-height: 220px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  object-fit: contain;
+  background: #111814;
+}
+
+.process-steps {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.65rem 1rem;
+  list-style: none;
+  padding: 0;
+  max-width: 720px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.process-steps li {
+  position: relative;
+  padding-left: 1.2rem;
+}
+
+.process-steps li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.45rem;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--leaf);
+}
+
 .stat-card {
   padding: 1rem 1.1rem;
   box-shadow: 0 10px 24px rgba(36, 48, 40, 0.04);
+  height: 100%;
 }
 
 .stat-label {
@@ -48,21 +151,9 @@ body {
 }
 
 .stat-value {
-  font-size: 1.7rem;
+  font-size: 1.55rem;
   font-weight: 700;
   color: var(--leaf-deep);
-}
-
-.drop-zone {
-  border-style: dashed;
-  padding: 2.4rem 1.5rem;
-  text-align: center;
-  transition: border-color 0.15s ease, background 0.15s ease;
-}
-
-.drop-zone.dragover {
-  border-color: var(--leaf);
-  background: #eef6ef;
 }
 
 .panel {
@@ -93,16 +184,6 @@ body {
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7);
   pointer-events: none;
   z-index: 2;
-}
-
-.mode-select {
-  display: flex;
-  align-items: center;
-}
-
-.mode-select .form-select {
-  width: auto;
-  min-width: 210px;
 }
 
 .summary-note {
@@ -139,7 +220,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.7rem;
-  max-height: 520px;
+  max-height: 420px;
   overflow: auto;
 }
 
@@ -150,6 +231,8 @@ body {
   cursor: pointer;
   background: #fff;
   transition: border-color 0.15s ease, transform 0.15s ease;
+  text-align: left;
+  width: 100%;
 }
 
 .leaf-item:hover,
@@ -222,8 +305,48 @@ body {
   border-color: var(--leaf);
 }
 
+.metrics-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1050;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.metrics-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(20, 28, 22, 0.45);
+}
+
+.metrics-dialog {
+  position: relative;
+  z-index: 1;
+  width: min(640px, 100%);
+  max-height: min(88vh, 820px);
+  overflow: auto;
+}
+
+.metrics-section-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--leaf-deep);
+  margin-bottom: 0.75rem;
+}
+
 @media (max-width: 768px) {
   .leaf-detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .navbar-brand {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .brand-subtitle {
+    margin-left: 0;
   }
 }

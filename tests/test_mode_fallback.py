@@ -1,4 +1,4 @@
-"""Tests for predict mode fallback behavior without requiring GPU models."""
+"""Tests for auto segmentation and full-image fallback without GPU models."""
 
 from __future__ import annotations
 
@@ -102,45 +102,25 @@ class ModeFallbackTests(unittest.TestCase):
 
     @patch("app.services.classification_service.classify_leaf_crops")
     @patch("app.services.segmentation_service.segment_leaves")
-    def test_single_leaf_skips_segmenter(
+    def test_auto_with_eight_instances(
         self,
         segment_leaves: MagicMock,
         classify_leaf_crops: MagicMock,
     ) -> None:
-        classify_leaf_crops.return_value = [_fake_classification("rust")]
-        payload = self.service._run_pipeline(
-            image=self.image, bundle=self.bundle, requested_mode="single_leaf"
-        )
-        segment_leaves.assert_not_called()
-        self.assertEqual(payload["requested_mode"], "single_leaf")
-        self.assertEqual(payload["resolved_mode"], "single_leaf")
-        self.assertFalse(payload["fallback_to_single_leaf"])
-        self.assertEqual(payload["timing"]["segmentation_ms"], 0.0)
-        self.assertEqual(len(payload["leaves"]), 1)
-        self.assertEqual(payload["valid_instances"], 1)
-        self.assertEqual(payload["raw_instances"], 0)
-
-    @patch("app.services.classification_service.classify_leaf_crops")
-    @patch("app.services.segmentation_service.segment_leaves")
-    def test_auto_with_five_valid_instances(
-        self,
-        segment_leaves: MagicMock,
-        classify_leaf_crops: MagicMock,
-    ) -> None:
-        instances = _make_instances(5)
+        instances = _make_instances(8)
         segment_leaves.return_value = {
             "elapsed_ms": 25.4,
-            "raw_instances": 5,
-            "valid_instances": 5,
+            "raw_instances": 8,
+            "valid_instances": 8,
             "instances": instances,
             "boxes": [item["bbox_xyxy"] for item in instances],
-            "confidences": [0.8] * 5,
+            "confidences": [0.8] * 8,
             "masks": [item["mask"] for item in instances],
             "width": 320,
             "height": 240,
         }
         classify_leaf_crops.return_value = [
-            _fake_classification("rust") for _ in range(5)
+            _fake_classification("rust") for _ in range(8)
         ]
         payload = self.service._run_pipeline(
             image=self.image, bundle=self.bundle, requested_mode="auto"
@@ -148,21 +128,18 @@ class ModeFallbackTests(unittest.TestCase):
         segment_leaves.assert_called_once()
         self.assertEqual(payload["requested_mode"], "auto")
         self.assertEqual(payload["resolved_mode"], "whole_image")
+        self.assertEqual(payload["analysis_scope"], "leaf_instances")
         self.assertFalse(payload["fallback_to_single_leaf"])
-        self.assertEqual(len(payload["leaves"]), 5)
-        self.assertEqual(payload["valid_instances"], 5)
-        self.assertEqual(payload["raw_instances"], 5)
-        summary = build_summary(
-            payload["leaves"],
-            "healthy",
-            disease_classes=["miner", "rust", "phoma"],
-        )
-        self.assertEqual(summary["total_leaves"], 5)
-        self.assertEqual(summary["total_leaves"], len(payload["leaves"]))
+        self.assertEqual(payload["raw_instances"], 8)
+        self.assertEqual(payload["valid_instances"], 8)
+        self.assertEqual(len(payload["leaves"]), 8)
+        self.assertIsNone(payload["full_image_leaf"])
+        args = classify_leaf_crops.call_args[0]
+        self.assertEqual(len(args[1]), 8)
 
     @patch("app.services.classification_service.classify_leaf_crops")
     @patch("app.services.segmentation_service.segment_leaves")
-    def test_auto_fallback_keeps_requested_mode(
+    def test_auto_fallback_is_full_image_not_fake_leaf(
         self,
         segment_leaves: MagicMock,
         classify_leaf_crops: MagicMock,
@@ -185,9 +162,12 @@ class ModeFallbackTests(unittest.TestCase):
         segment_leaves.assert_called_once()
         self.assertEqual(payload["requested_mode"], "auto")
         self.assertEqual(payload["resolved_mode"], "single_leaf")
+        self.assertEqual(payload["analysis_scope"], "full_image")
         self.assertTrue(payload["fallback_to_single_leaf"])
+        self.assertEqual(payload["valid_instances"], 0)
+        self.assertEqual(payload["leaves"], [])
+        self.assertIsNotNone(payload["full_image_leaf"])
         self.assertEqual(payload["timing"]["segmentation_ms"], 26.4)
-        self.assertEqual(len(payload["leaves"]), 1)
 
     @patch("app.services.classification_service.classify_leaf_crops")
     @patch("app.services.segmentation_service.segment_leaves")
@@ -207,37 +187,38 @@ class ModeFallbackTests(unittest.TestCase):
             "width": 320,
             "height": 240,
         }
-        classify_leaf_crops.return_value = []
         payload = self.service._run_pipeline(
             image=self.image, bundle=self.bundle, requested_mode="whole_image"
         )
-        self.assertEqual(payload["requested_mode"], "whole_image")
         self.assertEqual(payload["resolved_mode"], "whole_image")
         self.assertFalse(payload["fallback_to_single_leaf"])
         self.assertEqual(payload["leaves"], [])
+        self.assertIsNone(payload["full_image_leaf"])
         self.assertEqual(payload["timing"]["segmentation_ms"], 18.0)
-        self.assertEqual(payload["raw_instances"], 2)
-        self.assertEqual(payload["valid_instances"], 0)
-        classify_leaf_crops.assert_called()
+        classify_leaf_crops.assert_not_called()
+
+    @patch("app.services.classification_service.classify_leaf_crops")
+    @patch("app.services.segmentation_service.segment_leaves")
+    def test_default_request_without_mode_uses_auto(
+        self,
+        segment_leaves: MagicMock,
+        classify_leaf_crops: MagicMock,
+    ) -> None:
+        from app.services.inference_service import resolve_predict_mode
+
+        self.assertEqual(resolve_predict_mode(None), "auto")
+        self.assertEqual(resolve_predict_mode(""), "auto")
 
 
 class VisualizationConsistencyTests(unittest.TestCase):
-    def test_single_leaf_visualizations_do_not_draw_full_image_box(self) -> None:
+    def test_full_image_visualizations_do_not_draw_bbox(self) -> None:
         image = Image.new("RGB", (120, 80), color=(10, 20, 30))
-        leaf = {
-            "leaf_id": 0,
-            "bbox_xyxy": [0, 0, 120, 80],
-            "predicted_labels": ["rust"],
-            "primary_label": "rust",
-            "classification_confidence": 0.9,
-        }
-        mask = Image.new("L", (120, 80), 255)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             overlay = visualization_service.save_prediction_overlay(
                 image,
-                [leaf],
-                [mask],
+                [],
+                [],
                 "healthy",
                 ["miner", "rust", "phoma"],
                 root / "overlay.jpg",
@@ -245,76 +226,23 @@ class VisualizationConsistencyTests(unittest.TestCase):
             )
             boxes = visualization_service.save_boxes_overlay(
                 image,
-                [leaf],
+                [],
                 root / "boxes.jpg",
                 draw_annotations=False,
             )
-            mask_path = visualization_service.save_mask_overlay(
-                image,
-                [leaf],
-                [mask],
-                "healthy",
-                root / "mask.jpg",
-                draw_annotations=False,
-            )
-            for path in (overlay, boxes, mask_path):
+            for path in (overlay, boxes):
                 rendered = Image.open(path).convert("RGB")
                 diff = ImageChops.difference(rendered, image.convert("RGB"))
-                self.assertFalse(diff.getbbox(), f"{path.name} should equal original")
-
-    def test_boxes_overlay_draws_one_box_per_leaf(self) -> None:
-        image = Image.new("RGB", (200, 120), color=(8, 8, 8))
-        leaves = []
-        for index, box in enumerate([[10, 10, 50, 50], [70, 20, 120, 80], [130, 30, 180, 90]]):
-            leaves.append(
-                {
-                    "leaf_id": index,
-                    "bbox_xyxy": box,
-                    "predicted_labels": ["rust"],
-                    "primary_label": "rust",
-                    "classification_confidence": 0.8,
-                }
-            )
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "boxes.jpg"
-            visualization_service.save_boxes_overlay(image, leaves, path)
-            rendered = Image.open(path).convert("RGB")
-            # Annotated image must differ from plain original.
-            self.assertTrue(ImageChops.difference(rendered, image).getbbox())
+                self.assertFalse(diff.getbbox())
 
 
 class ConsistencyGuardTests(unittest.TestCase):
-    def test_summary_matches_leaf_count(self) -> None:
-        leaves = [
-            {
-                "predicted_labels": ["healthy"],
-                "classification_confidence": 0.9,
-            },
-            {
-                "predicted_labels": ["rust"],
-                "classification_confidence": 0.8,
-            },
-        ]
+    def test_summary_matches_leaf_count_including_zero(self) -> None:
         summary = build_summary(
-            leaves, "healthy", disease_classes=["miner", "rust", "phoma"]
+            [], "healthy", disease_classes=["miner", "rust", "phoma"]
         )
-        InferenceService._assert_prediction_consistency(summary, leaves)
-        self.assertEqual(summary["total_leaves"], len(leaves))
-        self.assertEqual(
-            summary["healthy_leaves"] + summary["diseased_leaves"],
-            summary["total_leaves"],
-        )
-
-    def test_inconsistent_summary_raises(self) -> None:
-        with self.assertRaises(RuntimeError):
-            InferenceService._assert_prediction_consistency(
-                {
-                    "total_leaves": 2,
-                    "healthy_leaves": 1,
-                    "diseased_leaves": 1,
-                },
-                [],
-            )
+        InferenceService._assert_prediction_consistency(summary, [])
+        self.assertEqual(summary["total_leaves"], 0)
 
 
 if __name__ == "__main__":

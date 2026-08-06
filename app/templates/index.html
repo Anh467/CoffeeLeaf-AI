@@ -1,53 +1,103 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="mb-4">
-  <div class="row g-3" id="top-cards">
-    <div class="col-6 col-lg-3"><div class="stat-card"><div class="stat-label">Total Leaves</div><div class="stat-value" id="stat-total">—</div></div></div>
-    <div class="col-6 col-lg-3"><div class="stat-card"><div class="stat-label">Diseased Leaves</div><div class="stat-value" id="stat-diseased">—</div></div></div>
-    <div class="col-6 col-lg-3"><div class="stat-card"><div class="stat-label">Average Confidence</div><div class="stat-value" id="stat-confidence">—</div></div></div>
-    <div class="col-6 col-lg-3"><div class="stat-card"><div class="stat-label">Total Time</div><div class="stat-value" id="stat-time">—</div></div></div>
-  </div>
-</section>
-
 {% if not health.models_loaded %}
-<div class="alert alert-warning">
+<div class="alert alert-warning mb-4">
   Deployment bundle chưa sẵn sàng. Chạy <code>dvc pull deployment</code> rồi khởi động lại server.
   {% if health.error %}<div class="small mt-1">{{ health.error }}</div>{% endif %}
 </div>
 {% endif %}
 
-<section class="upload-panel mb-4">
-  <form id="predict-form">
+<section id="home-state" class="home-state">
+  <div class="home-hero text-center mb-4">
+    <h1 class="home-title">Phân tích tình trạng lá cà phê</h1>
+    <p class="home-lead">
+      Tải ảnh cây hoặc lá cà phê. Hệ thống sẽ tự động phát hiện từng lá và phân loại bệnh.
+    </p>
+  </div>
+
+  <form id="predict-form" class="upload-panel home-upload mx-auto">
     <div id="drop-zone" class="drop-zone">
-      <p class="mb-2 fw-semibold">Drag &amp; Drop ảnh cây hoặc ảnh một lá</p>
-      <p class="text-secondary small mb-3">hoặc chọn file từ máy</p>
+      <p class="mb-2 fw-semibold">Kéo &amp; thả ảnh vào đây</p>
+      <p class="text-secondary small mb-3">hoặc chọn file từ máy · JPG, JPEG, PNG, WEBP</p>
       <label class="btn btn-success">
-        Browse Image
-        <input id="image-input" type="file" accept="image/*" hidden>
+        Chọn ảnh
+        <input id="image-input" type="file" accept=".jpg,.jpeg,.png,.webp,image/*" hidden>
       </label>
       <div id="file-name" class="small text-secondary mt-3"></div>
+      <div id="file-preview-wrap" class="file-preview-wrap d-none mt-3">
+        <img id="file-preview" alt="Xem trước ảnh đã chọn" class="file-preview">
+      </div>
     </div>
-    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mt-3">
-      <label class="mode-select mb-0">
-        <span class="small text-secondary me-2">Detection mode</span>
-        <select id="predict-mode" class="form-select form-select-sm">
-          <option value="auto" selected>Auto detect leaves</option>
-          <option value="whole_image">Whole image segmentation</option>
-          <option value="single_leaf">Single leaf</option>
-        </select>
-      </label>
-      <button id="predict-btn" class="btn btn-primary px-4" type="submit" disabled>Predict</button>
+    <div class="d-flex justify-content-center mt-3">
+      <button id="predict-btn" class="btn btn-primary btn-lg px-5" type="submit" disabled>
+        Bắt đầu phân tích
+      </button>
     </div>
   </form>
+
+  <ol class="process-steps mx-auto mt-4 mb-0">
+    <li>Phát hiện lá</li>
+    <li>Tách từng lá</li>
+    <li>Phân loại bệnh</li>
+    <li>Tổng hợp kết quả</li>
+  </ol>
 </section>
 
-<section id="results" class="d-none">
+<section id="loading-state" class="loading-state d-none text-center py-5">
+  <div class="spinner-border text-success mb-3" role="status" aria-hidden="true"></div>
+  <p class="fw-semibold mb-1">Đang phát hiện và phân tích lá cà phê…</p>
+  <p class="text-secondary small mb-0">Vui lòng chờ trong giây lát.</p>
+</section>
+
+<section id="error-state" class="error-state d-none">
+  <div class="panel error-card">
+    <h2 class="h5 text-danger mb-2">Không phân tích được ảnh</h2>
+    <p id="error-message" class="mb-3"></p>
+    <button type="button" class="btn btn-outline-success" id="error-retry-btn">Thử lại</button>
+  </div>
+</section>
+
+<section id="results" class="results-state d-none">
+  <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+    <div>
+      <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+        <h1 class="h3 mb-0">Kết quả phân tích</h1>
+        <span id="result-badge" class="badge text-bg-success">Thành công</span>
+        <span id="scope-badge" class="badge text-bg-secondary d-none">Phân tích toàn ảnh</span>
+      </div>
+      <p class="text-secondary mb-0" id="result-filename">—</p>
+    </div>
+    <div class="d-flex flex-wrap gap-2">
+      <button type="button" class="btn btn-outline-success" id="analyze-another-btn">Phân tích ảnh khác</button>
+      <button type="button" class="btn btn-primary" id="open-metrics-btn">Xem thông số</button>
+    </div>
+  </div>
+
   <div id="result-message" class="alert alert-info d-none"></div>
+
+  <div class="row g-3 mb-4" id="summary-cards">
+    <div class="col-6 col-lg">
+      <div class="stat-card"><div class="stat-label">Tổng số lá phát hiện</div><div class="stat-value" id="stat-total">—</div></div>
+    </div>
+    <div class="col-6 col-lg">
+      <div class="stat-card"><div class="stat-label">Lá khỏe</div><div class="stat-value" id="stat-healthy">—</div></div>
+    </div>
+    <div class="col-6 col-lg">
+      <div class="stat-card"><div class="stat-label">Lá bệnh</div><div class="stat-value" id="stat-diseased">—</div></div>
+    </div>
+    <div class="col-6 col-lg">
+      <div class="stat-card"><div class="stat-label">Độ tin cậy TB</div><div class="stat-value" id="stat-confidence">—</div></div>
+    </div>
+    <div class="col-6 col-lg">
+      <div class="stat-card"><div class="stat-label">Tổng thời gian</div><div class="stat-value" id="stat-time">—</div></div>
+    </div>
+  </div>
+
   <div class="row g-4">
     <div class="col-lg-7">
       <div class="panel">
-        <div class="d-flex justify-content-between align-items-center mb-3">
-          <h2 class="h5 mb-0">Original / Overlay</h2>
+        <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+          <h2 class="h5 mb-0">Ảnh phân tích</h2>
           <div class="btn-group btn-group-sm" role="group" id="view-tabs">
             <button type="button" class="btn btn-outline-secondary" data-view="original">Original</button>
             <button type="button" class="btn btn-outline-secondary active" data-view="overlay">Overlay</button>
@@ -55,7 +105,6 @@
             <button type="button" class="btn btn-outline-secondary" data-view="boxes" data-seg-tab="1">Boxes</button>
           </div>
         </div>
-        <p id="viewer-note" class="small text-secondary d-none mb-2"></p>
         <div class="viewer-frame" id="viewer-frame">
           <img id="main-image" alt="Prediction visualization" class="img-fluid">
           <div id="bbox-highlight" class="bbox-highlight d-none"></div>
@@ -64,57 +113,89 @@
     </div>
     <div class="col-lg-5">
       <div class="panel mb-4">
-        <h2 class="h5">Prediction Summary</h2>
+        <h2 class="h5">Tóm tắt</h2>
         <dl class="row mb-2 summary-grid">
-          <dt class="col-6">Total Leaves</dt><dd class="col-6" id="sum-total">—</dd>
-          <dt class="col-6">Healthy Leaves</dt><dd class="col-6" id="sum-healthy">—</dd>
-          <dt class="col-6">Diseased Leaves</dt><dd class="col-6" id="sum-diseased">—</dd>
           <dt class="col-6">Miner</dt><dd class="col-6" id="sum-miner">—</dd>
           <dt class="col-6">Rust</dt><dd class="col-6" id="sum-rust">—</dd>
           <dt class="col-6">Phoma</dt><dd class="col-6" id="sum-phoma">—</dd>
-          <dt class="col-6">Multi-disease Leaves</dt><dd class="col-6" id="sum-multi">—</dd>
-          <dt class="col-6">Average Confidence</dt><dd class="col-6" id="sum-confidence">—</dd>
+          <dt class="col-6">Multi-disease</dt><dd class="col-6" id="sum-multi">—</dd>
         </dl>
         <p class="summary-note mb-0">
-          A leaf may contain multiple diseases, so disease totals can exceed diseased leaves.
+          Một lá có thể mang nhiều bệnh, nên tổng theo bệnh có thể lớn hơn số lá bệnh.
         </p>
       </div>
-      <div class="panel mb-4">
-        <h2 class="h5">Processing Information</h2>
-        <dl class="row mb-0 summary-grid">
-          <dt class="col-6">Resolution</dt><dd class="col-6" id="info-resolution">—</dd>
-          <dt class="col-6">File Size</dt><dd class="col-6" id="info-size">—</dd>
-          <dt class="col-6">Requested Mode</dt><dd class="col-6" id="info-requested-mode">—</dd>
-          <dt class="col-6">Resolved Mode</dt><dd class="col-6" id="info-resolved-mode">—</dd>
-          <dt class="col-6">Fallback</dt><dd class="col-6" id="info-fallback">—</dd>
-          <dt class="col-6">Raw Instances</dt><dd class="col-6" id="info-raw-instances">—</dd>
-          <dt class="col-6">Valid Instances</dt><dd class="col-6" id="info-valid-instances">—</dd>
-          <dt class="col-6">Preprocessing</dt><dd class="col-6" id="info-preprocess">—</dd>
-          <dt class="col-6">Segmentation</dt><dd class="col-6" id="info-segmentation">—</dd>
-          <dt class="col-6">Classification</dt><dd class="col-6" id="info-classification">—</dd>
-          <dt class="col-6">Total Time</dt><dd class="col-6" id="info-total">—</dd>
-          <dt class="col-6">Segmenter</dt><dd class="col-6" id="info-segmenter">—</dd>
-          <dt class="col-6">Classifier</dt><dd class="col-6" id="info-classifier">—</dd>
-        </dl>
+
+      <div class="panel" id="leaf-panel">
+        <h2 class="h5" id="leaf-panel-title">Danh sách lá</h2>
+        <div id="leaf-list" class="leaf-list"></div>
       </div>
     </div>
   </div>
 
   <div class="row g-4 mt-1">
-    <div class="col-lg-5">
+    <div class="col-12">
       <div class="panel">
-        <h2 class="h5">Leaf List</h2>
-        <div id="leaf-list" class="leaf-list"></div>
-      </div>
-    </div>
-    <div class="col-lg-7">
-      <div class="panel">
-        <h2 class="h5">Selected Leaf</h2>
-        <div id="leaf-detail" class="leaf-detail text-secondary">Chọn một lá ở danh sách bên trái.</div>
+        <h2 class="h5" id="detail-panel-title">Chi tiết lá</h2>
+        <div id="leaf-detail" class="leaf-detail text-secondary">Chọn một lá ở danh sách để xem chi tiết.</div>
       </div>
     </div>
   </div>
 </section>
+
+<div id="metrics-modal" class="metrics-modal d-none" role="dialog" aria-modal="true" aria-labelledby="metrics-title">
+  <div class="metrics-backdrop" id="metrics-backdrop"></div>
+  <div class="metrics-dialog panel">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h2 class="h5 mb-0" id="metrics-title">Chi tiết xử lý</h2>
+      <button type="button" class="btn-close" id="metrics-close-x" aria-label="Đóng"></button>
+    </div>
+    <div class="metrics-body">
+      <section class="mb-4">
+        <h3 class="metrics-section-title">Thông tin ảnh</h3>
+        <dl class="row summary-grid mb-0">
+          <dt class="col-6">Filename</dt><dd class="col-6" id="m-filename">—</dd>
+          <dt class="col-6">Resolution</dt><dd class="col-6" id="m-resolution">—</dd>
+          <dt class="col-6">File size</dt><dd class="col-6" id="m-size">—</dd>
+          <dt class="col-6">Image format</dt><dd class="col-6" id="m-format">—</dd>
+        </dl>
+      </section>
+      <section class="mb-4">
+        <h3 class="metrics-section-title">Segmentation</h3>
+        <dl class="row summary-grid mb-0">
+          <dt class="col-6">Raw instances</dt><dd class="col-6" id="m-raw">—</dd>
+          <dt class="col-6">Valid instances</dt><dd class="col-6" id="m-valid">—</dd>
+          <dt class="col-6">Fallback</dt><dd class="col-6" id="m-fallback">—</dd>
+          <dt class="col-6">Analysis scope</dt><dd class="col-6" id="m-scope">—</dd>
+          <dt class="col-6">Detector threshold</dt><dd class="col-6" id="m-det-th">—</dd>
+        </dl>
+      </section>
+      <section class="mb-4">
+        <h3 class="metrics-section-title">Processing time</h3>
+        <dl class="row summary-grid mb-0">
+          <dt class="col-6">Preprocessing</dt><dd class="col-6" id="m-preprocess">—</dd>
+          <dt class="col-6">Segmentation</dt><dd class="col-6" id="m-segmentation">—</dd>
+          <dt class="col-6">Classification</dt><dd class="col-6" id="m-classification">—</dd>
+          <dt class="col-6">Visualization</dt><dd class="col-6" id="m-visualization">—</dd>
+          <dt class="col-6">Total time</dt><dd class="col-6" id="m-total">—</dd>
+        </dl>
+      </section>
+      <section>
+        <h3 class="metrics-section-title">Model</h3>
+        <dl class="row summary-grid mb-0">
+          <dt class="col-6">Segmenter</dt><dd class="col-6" id="m-segmenter">—</dd>
+          <dt class="col-6">Classifier</dt><dd class="col-6" id="m-classifier">—</dd>
+          <dt class="col-6">Schema version</dt><dd class="col-6" id="m-version">—</dd>
+          <dt class="col-6">Device</dt><dd class="col-6" id="m-device">—</dd>
+          <dt class="col-6">Deploy ready</dt><dd class="col-6" id="m-deploy">—</dd>
+          <dt class="col-6">Classifier threshold</dt><dd class="col-6" id="m-cls-th">—</dd>
+        </dl>
+      </section>
+    </div>
+    <div class="mt-4 text-end">
+      <button type="button" class="btn btn-outline-success" id="metrics-close-btn">Đóng</button>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}

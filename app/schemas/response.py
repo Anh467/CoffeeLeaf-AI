@@ -20,6 +20,7 @@ class ImageInfo(BaseModel):
     file_size: int
     filename: str
     mode: str = Field(description="auto | whole_image | single_leaf (legacy: tree)")
+    format: str | None = None
 
 
 class ProcessingInfo(BaseModel):
@@ -32,6 +33,10 @@ class ProcessingInfo(BaseModel):
     requested_mode: str | None = None
     resolved_mode: str | None = None
     fallback_to_single_leaf: bool = False
+    analysis_scope: str | None = Field(
+        default=None,
+        description="leaf_instances | full_image",
+    )
     raw_instances: int = 0
     valid_instances: int = 0
     segmenter: str | None = None
@@ -45,6 +50,7 @@ class ModelInfo(BaseModel):
     deploy_ready: bool
     detector_confidence: float
     classifier_confidence: float
+    device: str | None = None
 
 
 class SummaryInfo(BaseModel):
@@ -92,6 +98,18 @@ class LeafPrediction(BaseModel):
         return value
 
 
+class FullImageResult(BaseModel):
+    prediction: str
+    labels: list[str]
+    display_label: str | None = None
+    is_healthy: bool | None = None
+    confidence: float
+    classification_confidence: float | None = None
+    accepted: bool = True
+    probabilities: dict[str, float] = Field(default_factory=dict)
+    crop: str | None = None
+
+
 class VisualizationPaths(BaseModel):
     original: str
     overlay: str
@@ -108,6 +126,7 @@ class PredictResponse(BaseModel):
     model: ModelInfo
     summary: SummaryInfo
     leaves: list[LeafPrediction]
+    full_image_result: FullImageResult | None = None
     visualizations: VisualizationPaths
     result_path: str
     message: str | None = None

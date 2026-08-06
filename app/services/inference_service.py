@@ -156,13 +156,15 @@ class InferenceService:
             )
         total_ms = (time.perf_counter() - total_started) * 1000.0
 
-        draw_annotations = payload["resolved_mode"] != "single_leaf"
+        draw_annotations = payload["analysis_scope"] == "leaf_instances" and bool(
+            payload["leaves"]
+        )
         viz_started = time.perf_counter()
         enriched_leaves = visualization_service.write_leaf_artifacts(
             run_dir,
             payload["leaves"],
             payload["masks"],
-            payload["crops"],
+            payload["crops"] if payload["leaves"] else [],
         )
         overlay_path = visualization_service.save_prediction_overlay(
             image,
@@ -193,6 +195,26 @@ class InferenceService:
         )
         visualization_ms = (time.perf_counter() - viz_started) * 1000.0
 
+        response_leaves = [
+            self._serialize_leaf(leaf, prediction_id, payload["healthy_label"])
+            for leaf in enriched_leaves
+        ]
+        full_image_result = None
+        if payload.get("full_image_leaf") is not None:
+            # Optional crop preview for full-image analysis (not counted as a leaf).
+            crop_url = None
+            if payload["crops"]:
+                crop_dir = run_dir / "crops"
+                crop_dir.mkdir(parents=True, exist_ok=True)
+                crop_path = crop_dir / "full_image.jpg"
+                payload["crops"][0].convert("RGB").save(crop_path, quality=92)
+                crop_url = self._media_url(prediction_id, "crops/full_image.jpg")
+            full_image_result = self._serialize_full_image_result(
+                payload["full_image_leaf"],
+                payload["healthy_label"],
+                crop_url=crop_url,
+            )
+
         summary = build_summary(
             payload["leaves"],
             payload["healthy_label"],
@@ -200,10 +222,15 @@ class InferenceService:
             mode=payload["resolved_mode"],
             fallback_to_single_leaf=payload["fallback_to_single_leaf"],
         )
-        response_leaves = [
-            self._serialize_leaf(leaf, prediction_id, payload["healthy_label"])
-            for leaf in enriched_leaves
-        ]
+        if full_image_result is not None and not response_leaves:
+            summary["average_confidence"] = float(
+                full_image_result.get("classification_confidence", 0.0)
+            )
+            summary["detected_diseases"] = [
+                name
+                for name in full_image_result.get("labels", [])
+                if name != payload["healthy_label"]
+            ]
         self._assert_prediction_consistency(summary, response_leaves)
 
         message = self._build_message(payload, summary)
@@ -214,11 +241,11 @@ class InferenceService:
             "classification_time_ms": float(payload["timing"]["classification_ms"]),
             "visualization_time_ms": float(visualization_ms),
             "total_time_ms": float(total_ms),
-            # Legacy field mirrors resolved mode for older clients.
             "mode": payload["resolved_mode"],
             "requested_mode": payload["requested_mode"],
             "resolved_mode": payload["resolved_mode"],
             "fallback_to_single_leaf": bool(payload["fallback_to_single_leaf"]),
+            "analysis_scope": payload["analysis_scope"],
             "raw_instances": int(payload["raw_instances"]),
             "valid_instances": int(payload["valid_instances"]),
             "segmenter": payload["segmenter"],
@@ -235,13 +262,15 @@ class InferenceService:
             "classifier_confidence": float(
                 payload["manifest"]["thresholds"]["classifier_confidence"]
             ),
+            "device": str(self._bundle.device) if self._bundle is not None else "unknown",
         }
 
         LOGGER.info(
-            "Prediction requested_mode=%s resolved_mode=%s raw_instances=%d "
+            "Prediction requested_mode=%s resolved_mode=%s scope=%s raw_instances=%d "
             "valid_instances=%d leaves=%d fallback=%s segmentation_ms=%.1f",
             processing["requested_mode"],
             processing["resolved_mode"],
+            processing["analysis_scope"],
             processing["raw_instances"],
             processing["valid_instances"],
             len(response_leaves),
@@ -257,11 +286,13 @@ class InferenceService:
                 "file_size": file_size,
                 "filename": Path(filename).name,
                 "mode": payload["resolved_mode"],
+                "format": extension.lstrip(".").upper() or "UNKNOWN",
             },
             "processing": processing,
             "model": model_info,
             "summary": summary,
             "leaves": response_leaves,
+            "full_image_result": full_image_result,
             "visualizations": {
                 "original": self._media_url(prediction_id, original_path.name),
                 "overlay": self._media_url(prediction_id, overlay_path.name),
@@ -341,12 +372,27 @@ class InferenceService:
         segmentation_ms = 0.0
         raw_instances = 0
         valid_instances = 0
+        analysis_scope = "leaf_instances"
+        full_image_leaf: dict[str, Any] | None = None
+        used_masks: list = []
+        crops: list = []
 
         if requested_mode == "single_leaf":
+            # Explicit full-image classification (API compatibility).
             prepared = classification_service.prepare_single_leaf_crop(image, bundle)
-            used_masks = prepared["masks"]
+            classified = classification_service.classify_crops(
+                prepared["tensors"], prepared["leaves"], bundle
+            )
+            full_image_leaf = classified["leaves"][0] if classified["leaves"] else None
+            crops = prepared["crops"]
             resolved_mode: PredictMode = "single_leaf"
-            valid_instances = len(prepared["leaves"])
+            analysis_scope = "full_image"
+            leaves: list[dict[str, Any]] = []
+            timing = {
+                "preprocess_ms": float(prepared["elapsed_ms"]),
+                "segmentation_ms": 0.0,
+                "classification_ms": float(classified["elapsed_ms"]),
+            }
         else:
             segmentation = segmentation_service.segment_leaves(image, bundle)
             segmentation_ms = float(segmentation["elapsed_ms"])
@@ -358,46 +404,62 @@ class InferenceService:
                     image, instances, bundle
                 )
                 used_masks = prepared["masks"]
-                # Successful segmentation resolves to whole_image regardless of auto.
+                crops = prepared["crops"]
+                classified = classification_service.classify_crops(
+                    prepared["tensors"], prepared["leaves"], bundle
+                )
+                leaves = classified["leaves"]
                 resolved_mode = "whole_image"
+                analysis_scope = "leaf_instances"
+                timing = {
+                    "preprocess_ms": float(prepared["elapsed_ms"]),
+                    "segmentation_ms": segmentation_ms,
+                    "classification_ms": float(classified["elapsed_ms"]),
+                }
             elif requested_mode == "auto":
+                # Auto fallback: classify whole image, but do NOT invent a detected leaf.
                 fallback = True
                 prepared = classification_service.prepare_single_leaf_crop(image, bundle)
-                used_masks = prepared["masks"]
-                resolved_mode = "single_leaf"
-                valid_instances = len(prepared["leaves"])
-            else:
-                # whole_image with zero detections: return empty result, no crash.
-                prepared = {
-                    "elapsed_ms": 0.0,
-                    "leaves": [],
-                    "crops": [],
-                    "tensors": [],
-                    "masks": [],
-                }
-                used_masks = []
-                resolved_mode = "whole_image"
+                classified = classification_service.classify_crops(
+                    prepared["tensors"], prepared["leaves"], bundle
+                )
+                full_image_leaf = (
+                    classified["leaves"][0] if classified["leaves"] else None
+                )
+                crops = prepared["crops"]
+                leaves = []
                 valid_instances = 0
+                resolved_mode = "single_leaf"
+                analysis_scope = "full_image"
+                timing = {
+                    "preprocess_ms": float(prepared["elapsed_ms"]),
+                    "segmentation_ms": segmentation_ms,
+                    "classification_ms": float(classified["elapsed_ms"]),
+                }
+            else:
+                # whole_image with zero detections: empty result, no crash.
+                leaves = []
+                resolved_mode = "whole_image"
+                analysis_scope = "leaf_instances"
+                timing = {
+                    "preprocess_ms": 0.0,
+                    "segmentation_ms": segmentation_ms,
+                    "classification_ms": 0.0,
+                }
 
-        classified = classification_service.classify_crops(
-            prepared["tensors"], prepared["leaves"], bundle
-        )
         return {
             "requested_mode": requested_mode,
             "resolved_mode": resolved_mode,
-            # Legacy alias used by older callers/tests.
             "mode": resolved_mode,
             "fallback_to_single_leaf": fallback,
+            "analysis_scope": analysis_scope,
             "raw_instances": raw_instances,
             "valid_instances": valid_instances,
-            "timing": {
-                "preprocess_ms": float(prepared["elapsed_ms"]),
-                "segmentation_ms": segmentation_ms,
-                "classification_ms": float(classified["elapsed_ms"]),
-            },
-            "leaves": classified["leaves"],
+            "timing": timing,
+            "leaves": leaves,
+            "full_image_leaf": full_image_leaf,
             "masks": used_masks,
-            "crops": prepared["crops"],
+            "crops": crops,
             "healthy_label": bundle.healthy_label,
             "disease_classes": list(bundle.disease_classes),
             "segmenter": bundle.segmenter_name,
@@ -426,26 +488,47 @@ class InferenceService:
 
     @staticmethod
     def _build_message(payload: dict[str, Any], summary: dict[str, Any]) -> str | None:
-        resolved = payload["resolved_mode"]
-        requested = payload["requested_mode"]
-        if resolved == "single_leaf":
-            notes = [
-                "Single-leaf mode treats the entire image as one leaf. "
-                "Leaf segmentation and leaf counting are not performed.",
-                "Marks visible in Original are part of the uploaded image, not model predictions.",
-            ]
-            if payload["fallback_to_single_leaf"]:
-                notes.insert(
-                    0,
-                    "Auto mode found no valid leaf instances and fell back to single-leaf classification.",
+        if payload.get("analysis_scope") == "full_image":
+            if payload.get("fallback_to_single_leaf"):
+                return (
+                    "Không phát hiện được từng lá riêng biệt. "
+                    "Hệ thống đã tự động phân tích toàn bộ ảnh."
                 )
-            return " ".join(notes)
-        if summary["total_leaves"] == 0 and requested == "whole_image":
             return (
-                "No leaves detected. Try Auto mode for close-up fallback, "
-                "or upload a clearer whole-tree photo."
+                "Đã phân tích toàn bộ ảnh như một đơn vị. "
+                "Leaf segmentation và leaf counting không được thực hiện."
+            )
+        if summary["total_leaves"] == 0 and payload.get("requested_mode") == "whole_image":
+            return (
+                "Không phát hiện được lá nào trong ảnh. "
+                "Hãy thử ảnh rõ hơn hoặc để hệ thống tự phân tích toàn ảnh (auto)."
             )
         return None
+
+    def _serialize_full_image_result(
+        self,
+        leaf: dict[str, Any],
+        healthy_label: str,
+        *,
+        crop_url: str | None = None,
+    ) -> dict[str, Any]:
+        labels = list(leaf.get("predicted_labels", []))
+        display_label = display_label_for_leaf(leaf, healthy_label)
+        prediction = "+".join(labels) if labels else "unknown"
+        return {
+            "prediction": prediction,
+            "labels": labels,
+            "display_label": display_label,
+            "is_healthy": is_healthy_leaf(leaf, healthy_label),
+            "confidence": float(leaf.get("classification_confidence", 0.0)),
+            "classification_confidence": float(leaf.get("classification_confidence", 0.0)),
+            "accepted": bool(leaf.get("accepted", False)),
+            "probabilities": {
+                str(key): float(value)
+                for key, value in dict(leaf.get("probabilities", {})).items()
+            },
+            "crop": crop_url,
+        }
 
     def _serialize_leaf(
         self,
@@ -538,9 +621,19 @@ class InferenceService:
             "valid_instances",
             int((payload.get("summary") or {}).get("total_leaves", 0)),
         )
+        processing.setdefault("analysis_scope", "leaf_instances")
         processing.setdefault("segmenter", (payload.get("model") or {}).get("segmenter"))
         processing.setdefault("classifier", (payload.get("model") or {}).get("classifier"))
         payload["processing"] = processing
+        payload.setdefault("full_image_result", None)
+
+        image_info = dict(payload.get("image") or {})
+        image_info.setdefault("format", Path(str(image_info.get("filename", ""))).suffix.lstrip(".").upper() or None)
+        payload["image"] = image_info
+
+        model_info = dict(payload.get("model") or {})
+        model_info.setdefault("device", None)
+        payload["model"] = model_info
 
         visualizations = dict(payload.get("visualizations") or {})
         if "mask" not in visualizations and "mask_overlay" in visualizations:

@@ -41,7 +41,7 @@ async def dashboard(request: Request, service: InferenceDep) -> HTMLResponse:
         request,
         "index.html",
         {
-            "title": "Coffee Leaf Disease Dashboard",
+            "title": "CoffeeLeaf AI",
             "health": service.health(),
         },
     )
@@ -70,20 +70,27 @@ async def health(service: InferenceDep) -> HealthResponse:
 @router.post("/predict", response_model=PredictResponse)
 async def predict(
     service: InferenceDep,
-    image: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
+    image: UploadFile | None = File(default=None),
     mode: str = Form(default="auto"),
     allow_single_leaf_fallback: bool | None = Form(default=None),
 ) -> PredictResponse:
-    if not image.filename:
+    upload = file or image
+    if upload is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing upload field. Send multipart form field `file` (or legacy `image`).",
+        )
+    if not upload.filename:
         raise HTTPException(status_code=400, detail="Uploaded file must have a filename")
     try:
-        content = await image.read()
+        content = await upload.read()
         if not content:
             raise HTTPException(status_code=400, detail="Uploaded image is empty")
         result = service.predict_upload(
             image_bytes=content,
-            filename=image.filename,
-            mode=mode,
+            filename=upload.filename,
+            mode=mode or "auto",
             allow_single_leaf_fallback=allow_single_leaf_fallback,
         )
         return PredictResponse(**result)
