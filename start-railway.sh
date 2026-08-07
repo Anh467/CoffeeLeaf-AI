@@ -6,6 +6,13 @@ if [ -z "${DAGSHUB_USER_TOKEN:-}" ]; then
   exit 1
 fi
 
+# Railway builds from a source archive, so the runtime container may not
+# contain .git. DVC expects to run inside a Git repository for `dvc pull`.
+if [ ! -d .git ]; then
+  echo "Initializing lightweight Git repository for DVC..."
+  git init -q
+fi
+
 echo "Configuring DVC remote credentials..."
 dvc remote modify dagshub-s3 --local access_key_id "$DAGSHUB_USER_TOKEN"
 dvc remote modify dagshub-s3 --local secret_access_key "$DAGSHUB_USER_TOKEN"
