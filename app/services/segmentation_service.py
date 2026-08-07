@@ -62,6 +62,90 @@ def mask_area(mask: Image.Image | np.ndarray) -> int:
     return int(np.count_nonzero(array >= 128))
 
 
+def mask_overlap_metrics(
+    mask_a: Image.Image | np.ndarray,
+    mask_b: Image.Image | np.ndarray,
+) -> tuple[float, float]:
+    """Return (IoU, containment) for two binary instance masks.
+
+    ``containment`` is intersection / smaller-mask-area. It catches duplicate
+    predictions where one mask covers only part of the same physical leaf,
+    while IoU catches near-identical duplicate masks.
+    """
+    a = np.asarray(mask_a)
+    b = np.asarray(mask_b)
+    if a.ndim == 3:
+        a = a[..., 0]
+    if b.ndim == 3:
+        b = b[..., 0]
+    a = a >= 128
+    b = b >= 128
+
+    area_a = int(np.count_nonzero(a))
+    area_b = int(np.count_nonzero(b))
+    if area_a == 0 or area_b == 0:
+        return 0.0, 0.0
+
+    intersection = int(np.count_nonzero(np.logical_and(a, b)))
+    if intersection == 0:
+        return 0.0, 0.0
+
+    union = area_a + area_b - intersection
+    iou = intersection / union if union > 0 else 0.0
+    containment = intersection / min(area_a, area_b)
+    return float(iou), float(containment)
+
+
+def deduplicate_leaf_instances(
+    instances: list[dict[str, Any]],
+    *,
+    iou_threshold: float = 0.60,
+    containment_threshold: float = 0.90,
+) -> list[dict[str, Any]]:
+    """Remove duplicate segmenter predictions for the same physical leaf.
+
+    YOLO NMS handles most duplicate boxes, but instance segmentation can still
+    return a second partial mask for the same leaf. We keep the higher-confidence
+    prediction when masks are near-identical (high IoU) or one mask is almost
+    completely contained inside the other (high containment).
+    """
+    if len(instances) <= 1:
+        return instances
+
+    ranked = sorted(
+        instances,
+        key=lambda item: (
+            float(item.get("detector_confidence", 0.0)),
+            int(item.get("mask_area", 0)),
+        ),
+        reverse=True,
+    )
+    kept: list[dict[str, Any]] = []
+
+    for candidate in ranked:
+        duplicate = False
+        for existing in kept:
+            iou, containment = mask_overlap_metrics(candidate["mask"], existing["mask"])
+            if iou >= iou_threshold or containment >= containment_threshold:
+                duplicate = True
+                LOGGER.debug(
+                    "Dropping duplicate leaf instance conf=%.3f against conf=%.3f "
+                    "(mask_iou=%.3f containment=%.3f)",
+                    float(candidate.get("detector_confidence", 0.0)),
+                    float(existing.get("detector_confidence", 0.0)),
+                    iou,
+                    containment,
+                )
+                break
+        if not duplicate:
+            kept.append(candidate)
+
+    kept.sort(key=lambda item: tuple(item["bbox_xyxy"]))
+    for leaf_id, item in enumerate(kept):
+        item["leaf_id"] = leaf_id
+    return kept
+
+
 def min_crop_size_from_manifest(manifest: dict[str, Any]) -> int:
     preprocessing = manifest.get("preprocessing") or {}
     if "min_crop_size" in preprocessing:
@@ -84,6 +168,7 @@ def build_leaf_instances(
     - Prefer YOLO xyxy boxes; fall back to bbox-from-mask when needed.
     - Prefer mask instances; synthesize a box mask when only boxes exist.
     - Drop empty / too-small instances.
+    - Remove duplicate masks for the same physical leaf.
     - Sort left-to-right, top-to-bottom for stable leaf_id assignment.
     """
     count = max(len(boxes), len(masks))
@@ -125,14 +210,13 @@ def build_leaf_instances(
                 "detector_confidence": confidence,
                 "mask": mask,
                 "mask_area": area,
-                "sort_key": (box[0], box[1], box[2], box[3]),
             }
         )
 
-    instances.sort(key=lambda item: item["sort_key"])
+    instances = deduplicate_leaf_instances(instances)
+    instances.sort(key=lambda item: (item["bbox_xyxy"][0], item["bbox_xyxy"][1], item["bbox_xyxy"][2], item["bbox_xyxy"][3]))
     for leaf_id, item in enumerate(instances):
         item["leaf_id"] = leaf_id
-        item.pop("sort_key", None)
     return instances
 
 
